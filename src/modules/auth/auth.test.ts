@@ -284,19 +284,21 @@ describe('auth service', () => {
       unlock: vi.fn(() =>
         Promise.resolve({ dataKey: key, recoveryCode: null }),
       ),
-      recover: vi.fn(async (_userId, code: string, _password, beforeCommit) => {
-        if (code !== 'GOOD-CODE') {
-          throw new AuthError('invalid-recovery');
-        }
-        await beforeCommit?.();
-        return key;
-      }),
+      recover: vi.fn(
+        async (_userId, code: string, _password, commitPassword) => {
+          if (code !== 'GOOD-CODE') {
+            throw new AuthError('invalid-recovery');
+          }
+          await commitPassword?.();
+          return key;
+        },
+      ),
       changePassword: vi.fn(
-        async (_userId, current: string, _next, beforeCommit) => {
+        async (_userId, current: string, _next, commitPassword) => {
           if (current !== PASSWORD) {
             throw new AuthError('invalid-credentials');
           }
-          await beforeCommit?.();
+          await commitPassword?.();
         },
       ),
       issueRecoveryCode: vi.fn(() =>
@@ -1138,6 +1140,68 @@ describe('keyring concurrency and key stores', () => {
     await expect(vanished.unlock('u', PASSWORD)).rejects.toMatchObject({
       code: 'stale',
     });
+  });
+
+  it('stores the new wrap before changing the provider’s password', async () => {
+    const store = createLocalWrappedKeyStore(freshAccounts());
+    const keyring = createKeyring({ store, iterations: ITERATIONS });
+    await keyring.unlock('u', PASSWORD);
+    const commit = vi.fn(async () => {
+      // By now the key already unlocks with the new password.
+      await expect(keyring.unlock('u', NEW_PASSWORD)).resolves.toBeDefined();
+    });
+    await keyring.changePassword('u', PASSWORD, NEW_PASSWORD, commit);
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('never changes the provider’s password when the wrap can’t be stored', async () => {
+    const store = createLocalWrappedKeyStore(freshAccounts());
+    await createKeyring({ store, iterations: ITERATIONS }).unlock(
+      'u',
+      PASSWORD,
+    );
+    const failing = createKeyring({
+      store: { ...store, update: () => Promise.resolve(false) },
+      iterations: ITERATIONS,
+    });
+    const commit = vi.fn(() => Promise.resolve());
+    await expect(
+      failing.changePassword('u', PASSWORD, NEW_PASSWORD, commit),
+    ).rejects.toMatchObject({ code: 'stale' });
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('restores the old wrap when the provider rejects the new password', async () => {
+    const store = createLocalWrappedKeyStore(freshAccounts());
+    const keyring = createKeyring({ store, iterations: ITERATIONS });
+    const { recoveryCode } = await keyring.unlock('u', PASSWORD);
+    await expect(
+      keyring.recover('u', recoveryCode ?? '', NEW_PASSWORD, () =>
+        Promise.reject(new Error('provider down')),
+      ),
+    ).rejects.toThrow('provider down');
+    await expect(keyring.unlock('u', PASSWORD)).resolves.toBeDefined();
+    await expect(keyring.unlock('u', NEW_PASSWORD)).rejects.toMatchObject({
+      code: 'invalid-credentials',
+    });
+    // Even if restoring fails too, the provider's error is what's reported.
+    const brittle = createKeyring({
+      store: {
+        ...store,
+        update: vi
+          .fn()
+          .mockImplementationOnce((record, version: number) =>
+            store.update(record as never, version),
+          )
+          .mockRejectedValue(new Error('offline')),
+      },
+      iterations: ITERATIONS,
+    });
+    await expect(
+      brittle.changePassword('u', PASSWORD, NEW_PASSWORD, () =>
+        Promise.reject(new Error('provider down')),
+      ),
+    ).rejects.toThrow('provider down');
   });
 
   it('forgets a local key on account deletion', async () => {

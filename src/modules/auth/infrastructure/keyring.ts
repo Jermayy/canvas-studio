@@ -122,6 +122,39 @@ export function createKeyring(options: {
     }
   };
 
+  /**
+   * Stores the new password wrap, then lets the provider change the
+   * password. Saving first means a stale or failed save leaves the
+   * provider's password alone; a provider failure restores the old wrap.
+   */
+  const rewrap = async (
+    record: WrappedKeyRecord,
+    password: WrappedKey,
+    commitPassword: (() => Promise<void>) | undefined,
+  ) => {
+    await save(record, { password });
+    if (!commitPassword) {
+      return;
+    }
+    try {
+      await commitPassword();
+    } catch (error) {
+      // Best effort: if even this fails, the recovery code still unlocks
+      // the key, so the provider's error is the one worth reporting.
+      await store
+        .update(
+          {
+            userId: record.userId,
+            password: record.password,
+            recovery: record.recovery,
+          },
+          record.version + 1,
+        )
+        .catch(() => false);
+      throw error;
+    }
+  };
+
   const unlockExisting = async (record: WrappedKeyRecord, password: string) => {
     const dataKey = await unwrapWith(
       record.password,
@@ -165,7 +198,7 @@ export function createKeyring(options: {
       return { dataKey: await nonExtractable(dataKey), recoveryCode };
     },
 
-    recover: async (userId, recoveryCode, newPassword, beforeCommit) => {
+    recover: async (userId, recoveryCode, newPassword, commitPassword) => {
       const record = await store.get(userId);
       const code = normaliseRecoveryCode(recoveryCode);
       if (!record?.recovery || !code) {
@@ -176,9 +209,11 @@ export function createKeyring(options: {
         code,
         'invalid-recovery',
       );
-      const password = await wrapWith(newPassword, dataKey);
-      await beforeCommit?.();
-      await save(record, { password });
+      await rewrap(
+        record,
+        await wrapWith(newPassword, dataKey),
+        commitPassword,
+      );
       return nonExtractable(dataKey);
     },
 
@@ -186,7 +221,7 @@ export function createKeyring(options: {
       userId,
       currentPassword,
       newPassword,
-      beforeCommit,
+      commitPassword,
     ) => {
       const record = await store.get(userId);
       if (!record) {
@@ -197,9 +232,11 @@ export function createKeyring(options: {
         currentPassword,
         'invalid-credentials',
       );
-      const password = await wrapWith(newPassword, dataKey);
-      await beforeCommit?.();
-      await save(record, { password });
+      await rewrap(
+        record,
+        await wrapWith(newPassword, dataKey),
+        commitPassword,
+      );
     },
 
     issueRecoveryCode: async (userId, password) => {

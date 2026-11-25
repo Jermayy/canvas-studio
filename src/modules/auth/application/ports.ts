@@ -77,9 +77,11 @@ export interface UnlockResult {
 
 /**
  * Holds each account's workspace encryption key, wrapped twice: by the
- * password and by a recovery code. `beforeCommit` runs after the old
- * secret is proven and before anything is stored, so a failed password
- * update elsewhere leaves the keyring untouched.
+ * password and by a recovery code. `commitPassword` (the identity
+ * provider's password change) runs only after the new wrap is stored, so
+ * the key can never be left wrapped by a password the provider rejected;
+ * if it fails, the previous wrap is restored and the old password still
+ * works.
  */
 export interface Keyring {
   unlock: (userId: string, password: string) => Promise<UnlockResult>;
@@ -87,13 +89,13 @@ export interface Keyring {
     userId: string,
     recoveryCode: string,
     newPassword: string,
-    beforeCommit?: () => Promise<void>,
+    commitPassword?: () => Promise<void>,
   ) => Promise<CryptoKey>;
   changePassword: (
     userId: string,
     currentPassword: string,
     newPassword: string,
-    beforeCommit?: () => Promise<void>,
+    commitPassword?: () => Promise<void>,
   ) => Promise<void>;
   issueRecoveryCode: (userId: string, password: string) => Promise<string>;
   /** Account deletion: drops the wrapped key. */

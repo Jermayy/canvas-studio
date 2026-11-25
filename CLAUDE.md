@@ -73,7 +73,7 @@ Adapted from the portable steering kit the project was started with:
 - E2E specs run `page.evaluate` code in the browser, hence the separate `tsconfig.e2e.json` with DOM types.
 - Element `x,y` is the top-left of the unrotated box; rotation is about the centre (`rotate(r, cx, cy)`). Text height is derived from content (`withAutoHeight`), so never set it directly.
 - The app's own CSP blocks `fetch` of `blob:` URLs; read blobs directly.
-- Never change a password without re-wrapping the data key (`Keyring.changePassword` / `recover`); otherwise the workspace becomes unreadable. Server-side password updates run in `beforeCommit` so a failure leaves the keyring untouched.
+- Never change a password without re-wrapping the data key (`Keyring.changePassword` / `recover`); otherwise the workspace becomes unreadable. The new wrap is stored first and the provider's password changes after (`commitPassword`); if that fails, the old wrap is restored (ADR 0012).
 - The server only ever gets ciphertext: seal through `sync/envelope.ts`, never send a `DesignDocument` or image to Supabase directly. Pulled data is untrusted even after it decrypts (validate with zod; check the sealed id matches the row).
 - Sync bookkeeping writes go through the engine's `mark` queue; never set a design's server `version` outside the engine, or the next push conflicts.
 - Wrapped-key updates are version-checked (`WrappedKeyStore.update`); a `stale` AuthError means another device changed the key first, so nothing was stored.
