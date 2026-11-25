@@ -21,7 +21,7 @@ const FEATURES: readonly { icon: UiIconName; title: string; text: string }[] = [
   {
     icon: 'shield',
     title: 'Private by design',
-    text: 'Designs and images are encrypted on your device with a key only your password unlocks, before anything syncs.',
+    text: 'Designs and images are encrypted on your device with a key only your password (or recovery code) unlocks, before anything syncs.',
   },
   {
     icon: 'share',
@@ -134,7 +134,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
           <p>
             {auth.providerKind === 'local'
               ? 'Canvas Studio keeps your account and designs in this browser. Designs are encrypted at rest with a key derived from your password, and nothing is sent to a server.'
-              : 'Your email and a password hash are stored by Supabase Auth in Sydney. Designs and images are encrypted in your browser before they sync to Supabase (Sydney), together with your encryption key wrapped by your password and recovery code, so the server stores only data it can’t read. A design you share by link publishes its name and an image of it until you turn the link off. You can delete your account and all its data at any time.'}{' '}
+              : 'Your email and a password hash are stored by Supabase Auth in Sydney. Designs and images are encrypted in your browser before they sync to Supabase (Sydney), together with your encryption key wrapped by your password and recovery code, so the server can’t read your designs or images (it sees only what sync needs: ids, sizes and times). A design you share by link publishes its name and an image of it until you turn the link off. You can delete your account and all its data at any time.'}{' '}
             Interface preferences are kept in local storage. No analytics or
             tracking.
           </p>

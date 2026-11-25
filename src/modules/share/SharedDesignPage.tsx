@@ -59,7 +59,11 @@ export default function SharedDesignPage({ token }: { token: string }) {
     state?.kind === 'ready' ? `${state.view.title} · ${APP_NAME}` : APP_NAME;
 
   useEffect(() => {
+    const previous = document.title;
     document.title = title;
+    return () => {
+      document.title = previous;
+    };
   }, [title]);
 
   const download = async (view: SharedDesignView) => {
@@ -94,6 +98,9 @@ export default function SharedDesignPage({ token }: { token: string }) {
         </Link>
       </header>
       {state === null && <Spinner label="Loading design…" size={22} />}
+      {state?.kind !== 'ready' && (
+        <h1 className="visually-hidden">Shared design</h1>
+      )}
       {state?.kind === 'missing' && (
         <EmptyState icon="eye-off" title="This link isn’t available">
           It may have been turned off by its owner, or the design was deleted.

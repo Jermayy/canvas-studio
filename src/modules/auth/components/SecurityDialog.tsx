@@ -7,7 +7,7 @@ import { Button } from '@/shared/ui/Button';
 import { Dialog } from '@/shared/ui/Dialog';
 import { Banner } from '@/shared/ui/feedback';
 import { TextField } from '@/shared/ui/fields';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 const message = (error: unknown) =>
   error instanceof AuthError
@@ -192,6 +192,7 @@ function DeleteAccount() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const start = useRef<HTMLButtonElement>(null);
 
   const submit = async () => {
     if (busy || password.length === 0) {
@@ -199,11 +200,16 @@ function DeleteAccount() {
     }
     setBusy(true);
     setError(null);
-    const result = await deleteAccount(password);
-    // On success (or a half-finished delete) the app signs out and leaves.
-    if (!result.ok && !result.workspaceClosed) {
+    try {
+      const result = await deleteAccount(password);
+      // On success (or a half-finished delete) the app signs out and leaves.
+      if (!result.ok && !result.workspaceClosed) {
+        setError(result.message);
+        setBusy(false);
+      }
+    } catch {
+      setError('Something went wrong. Try again.');
       setBusy(false);
-      setError(result.message);
     }
   };
 
@@ -229,6 +235,7 @@ function DeleteAccount() {
       </p>
       {!confirming ? (
         <Button
+          ref={start}
           variant="danger"
           icon="trash"
           onClick={() => {
@@ -258,6 +265,10 @@ function DeleteAccount() {
                 setConfirming(false);
                 setPassword('');
                 setError(null);
+                // Back to the button that opened this step, not <body>.
+                requestAnimationFrame(() => {
+                  start.current?.focus();
+                });
               }}
             >
               Cancel
@@ -291,7 +302,7 @@ export function SecurityDialog({
       open={open}
       onClose={onClose}
       title="Account & security"
-      description="Your designs stay encrypted; changing the password re-wraps the key, nothing is lost."
+      description="Change your password or recovery code (your designs stay encrypted and nothing is lost), or delete your account."
     >
       <ChangePassword
         onChanged={() => {

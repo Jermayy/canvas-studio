@@ -1,15 +1,28 @@
 import { FullScreenLoader, Link } from '@/app/components/AppChrome';
-import { useWorkspaceState } from '@/app/services';
+import { useNotify, useWorkspaceState } from '@/app/services';
 import type { DesignDocument } from '@/modules/document/domain/schema';
 import { Studio } from '@/modules/studio/components/Studio';
-import { Button } from '@/shared/ui/Button';
+import { Button, IconButton } from '@/shared/ui/Button';
 import { Banner, EmptyState } from '@/shared/ui/feedback';
 import { useState } from 'react';
 
 interface Opened {
   document: DesignDocument;
-  /** The design's remote revision when the editor took it. */
-  revision: number;
+  /** Remounts the editor when the user loads the latest version. */
+  editorKey: number;
+  /** Remote changes up to this revision are already dealt with. */
+  seen: number;
+  /** Revision at which the design was deleted elsewhere, if it was. */
+  deletedAt: number | null;
+}
+
+/** Puts focus back in the editor after it remounts (not on <body>). */
+function focusEditor() {
+  requestAnimationFrame(() => {
+    window.document
+      .querySelector<HTMLInputElement>('input[aria-label="Design name"]')
+      ?.focus();
+  });
 }
 
 /** Opens a saved design from the signed-in workspace. */
@@ -22,9 +35,18 @@ export default function StudioRoute({ documentId }: { documentId: string }) {
   // The editor owns the document once open; later workspace updates are
   // its own saves echoing back, so only the first version seeds it. A
   // change from another device is offered, never forced on the editor.
+  const notify = useNotify();
   const [opened, setOpened] = useState<Opened | null>(null);
   if (!opened && document) {
-    setOpened({ document, revision });
+    setOpened({ document, editorKey: 0, seen: revision, deletedAt: null });
+  }
+  if (opened && revision > opened.seen) {
+    if (!document && opened.deletedAt !== revision) {
+      setOpened({ ...opened, deletedAt: revision });
+    } else if (document && opened.deletedAt === revision) {
+      // No newer remote change: the user's own edit brought it back.
+      setOpened({ ...opened, seen: revision, deletedAt: null });
+    }
   }
 
   if (status === 'idle' || status === 'loading') {
@@ -48,7 +70,14 @@ export default function StudioRoute({ documentId }: { documentId: string }) {
       </main>
     );
   }
-  const changedRemotely = revision > opened.revision;
+  const changedRemotely = revision > opened.seen;
+  const dismiss = () => {
+    setOpened({ ...opened, seen: revision, deletedAt: null });
+    focusEditor();
+  };
+  const dismissButton = (
+    <IconButton icon="close" label="Dismiss" size="sm" onClick={dismiss} />
+  );
   return (
     <>
       {changedRemotely && (
@@ -58,22 +87,32 @@ export default function StudioRoute({ documentId }: { documentId: string }) {
               tone="info"
               icon="refresh"
               action={
-                <Button
-                  size="sm"
-                  variant="primary"
-                  onClick={() => {
-                    setOpened({ document, revision });
-                  }}
-                >
-                  Load latest
-                </Button>
+                <span className="studio-remote-notice__actions">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => {
+                      setOpened({
+                        document,
+                        editorKey: opened.editorKey + 1,
+                        seen: revision,
+                        deletedAt: null,
+                      });
+                      notify('Latest version loaded.', { tone: 'success' });
+                      focusEditor();
+                    }}
+                  >
+                    Load latest
+                  </Button>
+                  {dismissButton}
+                </span>
               }
             >
               This design was changed on another device. Load the latest
               version, or keep editing to replace it.
             </Banner>
           ) : (
-            <Banner tone="warning">
+            <Banner tone="warning" action={dismissButton}>
               This design was deleted on another device. Keep editing to bring
               it back, or <Link to="/projects">return to your projects</Link>.
             </Banner>
@@ -81,7 +120,7 @@ export default function StudioRoute({ documentId }: { documentId: string }) {
         </div>
       )}
       <Studio
-        key={opened.revision}
+        key={opened.editorKey}
         initialDocument={opened.document}
         mode="account"
       />

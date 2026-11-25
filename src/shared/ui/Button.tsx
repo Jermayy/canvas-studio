@@ -1,6 +1,6 @@
 import { Icon } from '@/shared/ui/Icon';
 import type { UiIconName } from '@/shared/ui/uiIcons';
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import type { ButtonHTMLAttributes, ReactNode, Ref } from 'react';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
@@ -15,6 +15,7 @@ interface ButtonProps extends Omit<
   busy?: boolean;
   busyLabel?: string;
   children?: ReactNode;
+  ref?: Ref<HTMLButtonElement>;
 }
 
 export function Button({

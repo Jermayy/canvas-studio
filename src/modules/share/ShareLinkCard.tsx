@@ -16,7 +16,7 @@ import { Button } from '@/shared/ui/Button';
 import { Banner } from '@/shared/ui/feedback';
 import { TextField } from '@/shared/ui/fields';
 import { Icon } from '@/shared/ui/Icon';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Loaded =
   | { designId: string; status: 'ready'; share: DesignShare | null }
@@ -31,6 +31,7 @@ const NOT_SYNCED =
 function useDesignShare(shares: ShareStore, designId: string) {
   const { logger } = useServices();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     shares.getForDesign(designId).then(
@@ -49,12 +50,16 @@ function useDesignShare(shares: ShareStore, designId: string) {
     return () => {
       cancelled = true;
     };
-  }, [shares, designId, logger]);
+  }, [shares, designId, logger, attempt]);
   const current = loaded?.designId === designId ? loaded : null;
   const set = (share: DesignShare | null) => {
     setLoaded({ designId, status: 'ready', share });
   };
-  return [current, set] as const;
+  const retry = () => {
+    setLoaded(null);
+    setAttempt((value) => value + 1);
+  };
+  return [current, set, retry] as const;
 }
 
 /**
@@ -72,7 +77,8 @@ export function ShareLinkCard({
   const { sync } = useWorkspace();
   const notify = useNotify();
   const exporter = useExporter();
-  const [loaded, setShare] = useDesignShare(shares, document.id);
+  const [loaded, setShare, retryLoad] = useDesignShare(shares, document.id);
+  const linkField = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
   const share = loaded?.status === 'ready' ? loaded.share : null;
@@ -114,15 +120,27 @@ export function ShareLinkCard({
           png: image.blob,
         });
         setShare(published);
-        await files.copyText(
-          buildShareUrl(window.location.origin, published.id),
-        );
-        notify(
-          share
-            ? 'Link updated with your latest changes.'
-            : 'Link created and copied.',
-          { tone: 'success' },
-        );
+        try {
+          await files.copyText(
+            buildShareUrl(window.location.origin, published.id),
+          );
+          notify(
+            share
+              ? 'Link updated with your latest changes.'
+              : 'Link created and copied.',
+            { tone: 'success' },
+          );
+        } catch {
+          // Browsers can refuse the clipboard after a long publish; the
+          // link worked, so say so and select it for copying by hand.
+          notify('Link ready. Select it and copy it to share.', {
+            tone: 'info',
+          });
+          requestAnimationFrame(() => {
+            linkField.current?.select();
+            linkField.current?.focus();
+          });
+        }
       } catch (failure) {
         logger.error('share.publish_failed', {
           designId: document.id,
@@ -174,7 +192,14 @@ export function ShareLinkCard({
       </h3>
       {error && <Banner tone="error">{error}</Banner>}
       {loaded?.status === 'error' && (
-        <Banner tone="warning">
+        <Banner
+          tone="warning"
+          action={
+            <Button size="sm" onClick={retryLoad}>
+              Try again
+            </Button>
+          }
+        >
           Couldn’t check this design’s link. You’re probably offline.
         </Banner>
       )}
@@ -185,6 +210,7 @@ export function ShareLinkCard({
       </p>
       {url && (
         <TextField
+          ref={linkField}
           label="Share link"
           readOnly
           value={url}

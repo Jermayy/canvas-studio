@@ -1013,3 +1013,9 @@
   box-shadow: var(--shadow-lg);
   border-radius: var(--radius-lg);
 }
+
+.studio-remote-notice__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}

@@ -5,6 +5,7 @@ import {
   useState,
   type InputHTMLAttributes,
   type ReactNode,
+  type Ref,
 } from 'react';
 
 /**
@@ -23,6 +24,8 @@ interface TextFieldProps extends Omit<
   icon?: UiIconName;
   trailing?: ReactNode;
   hideLabel?: boolean;
+  /** Forwarded to the input (React 19 passes refs as props). */
+  ref?: Ref<HTMLInputElement>;
 }
 
 export function TextField({
