@@ -6,3 +6,6 @@
 
 # Fake password for an in-memory test account in an App flow test (never a real credential).
 629831dfaa9b6d77aae01e89c0a41a9641cfd161:src/app/App.test.tsx:generic-api-key:7
+
+# Fake third password in a keyring concurrency test, in-memory only (never a real credential).
+a2f81252508df51dcf13f5ce494bc5efcf297b00:src/modules/auth/auth.test.ts:generic-api-key:1109
