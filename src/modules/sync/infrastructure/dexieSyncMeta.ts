@@ -13,6 +13,8 @@ function fromRow(row: SyncDesignRow): DesignSyncRecord {
     version: row.version,
     dirty: row.dirty === 1,
     deleted: row.deleted === 1,
+    ...(row.rev === undefined ? {} : { rev: row.rev }),
+    ...(row.copiedFor === undefined ? {} : { copiedFor: row.copiedFor }),
   };
 }
 
@@ -22,6 +24,8 @@ function toRow(record: DesignSyncRecord): SyncDesignRow {
     version: record.version,
     dirty: record.dirty ? 1 : 0,
     deleted: record.deleted ? 1 : 0,
+    ...(record.rev === undefined ? {} : { rev: record.rev }),
+    ...(record.copiedFor === undefined ? {} : { copiedFor: record.copiedFor }),
   };
 }
 
@@ -56,16 +60,26 @@ export function createDexieSyncMetaStore(db: WorkspaceDatabase): SyncMetaStore {
       }),
     listDirtyDesigns: async () =>
       (await db.syncDesigns.where('dirty').equals(1).toArray()).map(fromRow),
+    listDesignIds: () => db.syncDesigns.toCollection().primaryKeys(),
     setAsset: async (record) => {
       await db.syncAssets.put(record);
     },
     settleAsset: (id, state) =>
       db.transaction('rw', db.syncAssets, async () => {
-        if ((await db.syncAssets.get(id))?.state === state) {
+        if ((await db.syncAssets.get(id))?.state !== state) {
+          return;
+        }
+        if (state === 'upload') {
+          await db.syncAssets.put({ id, state: 'synced' });
+        } else {
           await db.syncAssets.delete(id);
         }
       }),
-    listPendingAssets: () => db.syncAssets.toArray(),
+    listPendingAssets: async () =>
+      (await db.syncAssets.toArray()).filter(
+        (record) => record.state !== 'synced',
+      ),
+    listAssetIds: () => db.syncAssets.toCollection().primaryKeys(),
     getCursor: async () => {
       const row = await db.syncValues.get(CURSOR_KEY);
       return row ? parseCursor(row.value) : null;

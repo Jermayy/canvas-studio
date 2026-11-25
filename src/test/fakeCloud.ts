@@ -20,6 +20,10 @@ export interface FakeCloud {
   /** Fires realtime change notifications on every subscriber. */
   notify: () => void;
   setRealtime: (status: RealtimeStatus) => void;
+  /** Freezes server time, so rows share one `updatedAt` (keyset tie-break). */
+  freezeClock: () => void;
+  /** Rewrites a row's server time (a transaction that committed late). */
+  setUpdatedAt: (id: string, iso: string) => void;
   workspace: () => RemoteWorkspace;
   calls: string[];
 }
@@ -35,9 +39,12 @@ export function createFakeCloud(): FakeCloud {
   let failures = 0;
   let failureMessage = 'cloud unavailable';
   let clock = Date.parse('2026-11-01T00:00:00.000Z');
+  let frozen = false;
 
   const tick = () => {
-    clock += 1000;
+    if (!frozen) {
+      clock += 1000;
+    }
     return new Date(clock).toISOString();
   };
 
@@ -142,6 +149,15 @@ export function createFakeCloud(): FakeCloud {
     setRealtime: (status) => {
       for (const subscriber of subscribers) {
         subscriber.onStatus(status);
+      }
+    },
+    freezeClock: () => {
+      frozen = true;
+    },
+    setUpdatedAt: (id, iso) => {
+      const row = rows.get(id);
+      if (row) {
+        rows.set(id, { ...row, updatedAt: iso });
       }
     },
     workspace,

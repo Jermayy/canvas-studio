@@ -57,16 +57,32 @@ export interface WorkspaceActions {
   getAssetBlob: (id: string) => Promise<Blob | null>;
   /** True while an edit is still waiting to be stored. */
   hasUnsavedChanges: (id: string) => boolean;
-  /** Sync: store a design from another device (no echo back to sync). */
-  applyRemoteDocument: (document: DesignDocument) => Promise<void>;
-  /** Sync: drop a design deleted on another device. */
-  removeRemoteDocument: (id: string) => Promise<void>;
+  /**
+   * Sync: store a design from another device (no echo back to sync). With
+   * `expected`, it applies only if the in-memory copy is still that one and
+   * no save is pending (otherwise a local edit would be overwritten); it
+   * returns false when it didn't apply.
+   */
+  applyRemoteDocument: (
+    document: DesignDocument,
+    expected?: RemoteGuard,
+  ) => Promise<boolean>;
+  /** Sync: drop a design deleted on another device (same guard). */
+  removeRemoteDocument: (
+    id: string,
+    expected?: RemoteGuard,
+  ) => Promise<boolean>;
   /** Sync: store an image downloaded from the cloud. */
   applyRemoteAsset: (meta: AssetMeta, blob: Blob) => Promise<void>;
   dispose: () => void;
 }
 
 export type WorkspaceStore = StoreApi<WorkspaceState & WorkspaceActions>;
+
+/** The in-memory copy a sync pass based its decision on. */
+export interface RemoteGuard {
+  current: DesignDocument | undefined;
+}
 
 export interface WorkspaceDependencies {
   documents: DocumentStore;
@@ -331,8 +347,20 @@ export function createWorkspaceStore(
         return timers.has(id) || (status !== undefined && status !== 'saved');
       },
 
-      applyRemoteDocument: async (document) => {
+      applyRemoteDocument: async (document, expected) => {
+        const untouched = () =>
+          !expected ||
+          (get().documents[document.id] === expected.current &&
+            !get().hasUnsavedChanges(document.id));
+        if (!untouched()) {
+          return false;
+        }
         await deps.documents.put(document);
+        if (!untouched()) {
+          // An edit landed while writing; it's saved next and wins locally,
+          // and the caller keeps the server copy as a conflict.
+          return false;
+        }
         set((state) => ({
           documents: { ...state.documents, [document.id]: document },
           saves: {
@@ -348,9 +376,17 @@ export function createWorkspaceStore(
             [document.id]: (state.remoteRevisions[document.id] ?? 0) + 1,
           },
         }));
+        return true;
       },
 
-      removeRemoteDocument: async (id) => {
+      removeRemoteDocument: async (id, expected) => {
+        if (
+          expected &&
+          (get().documents[id] !== expected.current ||
+            get().hasUnsavedChanges(id))
+        ) {
+          return false;
+        }
         const timer = timers.get(id);
         if (timer !== undefined) {
           clearTimeout(timer);
@@ -365,6 +401,7 @@ export function createWorkspaceStore(
             [id]: (state.remoteRevisions[id] ?? 0) + 1,
           },
         }));
+        return true;
       },
 
       applyRemoteAsset: async (meta, blob) => {

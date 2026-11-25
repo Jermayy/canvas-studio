@@ -48,17 +48,30 @@ export interface SyncState {
   live: boolean;
 }
 
+/** The in-memory copy a decision was based on (see `applyRemoteDocument`). */
+export interface TargetGuard {
+  current: DesignDocument | undefined;
+}
+
 /** What the engine needs from the workspace it syncs. */
 export interface SyncTarget {
   getDocument: (id: string) => DesignDocument | undefined;
+  listDocumentIds: () => string[];
   /** True while an edit is still waiting to be stored on this device. */
   hasUnsavedChanges: (id: string) => boolean;
-  /** Stores a pulled design without echoing it back as a local change. */
-  applyRemoteDocument: (document: DesignDocument) => Promise<void>;
-  removeRemoteDocument: (id: string) => Promise<void>;
+  /**
+   * Stores a pulled design without echoing it back as a local change. With
+   * a guard, applies only if nothing changed locally; false if it didn't.
+   */
+  applyRemoteDocument: (
+    document: DesignDocument,
+    guard?: TargetGuard,
+  ) => Promise<boolean>;
+  removeRemoteDocument: (id: string, guard?: TargetGuard) => Promise<boolean>;
   /** Saves `document` under a new id as "(conflicted copy)". */
   createConflictCopy: (document: DesignDocument) => Promise<void>;
   hasAsset: (id: string) => boolean;
+  listAssetIds: () => string[];
   getAsset: (id: string) => Promise<{ meta: AssetMeta; blob: Blob } | null>;
   applyRemoteAsset: (meta: AssetMeta, blob: Blob) => Promise<void>;
 }
@@ -81,7 +94,7 @@ export interface SyncEngine {
   /** Runs a full pass now (resolves when done; never rejects). */
   syncNow: () => Promise<void>;
   retryNow: () => void;
-  /** Stops everything; resolves once pending bookkeeping is stored. */
+  /** Stops everything; resolves once any pass has stopped and bookkeeping is stored. */
   dispose: () => Promise<void>;
 }
 
@@ -128,6 +141,22 @@ export class RemoteDesignUnreadableError extends Error {
   }
 }
 
+/** Thrown at checkpoints once the engine is disposed, to end a pass quietly. */
+class SyncStopped extends Error {
+  constructor() {
+    super('sync stopped');
+    this.name = 'SyncStopped';
+  }
+}
+
+/** Image types a pulled image may claim (the upload rules' allow-list). */
+const IMAGE_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : 'Sync failed';
 }
@@ -156,6 +185,8 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
   let attempt = 0;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** A backoff retry is scheduled: polls and realtime wait for it. */
+  let retryPending = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   const cleanups: (() => void)[] = [];
 
@@ -190,27 +221,54 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
     clearTimeout(retryTimer);
     const wait = Math.min(maxRetry, retryBase * 2 ** attempt);
     attempt += 1;
+    retryPending = true;
     retryTimer = setTimeout(() => {
+      retryPending = false;
       void syncNow();
     }, wait);
+  };
+
+  const clearRetry = () => {
+    clearTimeout(retryTimer);
+    retryPending = false;
+  };
+
+  /** Polls and realtime pings respect the backoff after a failure. */
+  const nudge = () => {
+    if (!retryPending) {
+      requestSync(0);
+    }
+  };
+
+  const isDisposed = () => disposed;
+
+  const checkpoint = () => {
+    if (disposed) {
+      throw new SyncStopped();
+    }
   };
 
   // ---- push ---------------------------------------------------------------
 
   const pushAssets = async () => {
     for (const record of await meta.listPendingAssets()) {
-      if (record.state === 'delete') {
-        await remote.deleteAsset(record.id);
+      checkpoint();
+      const { id, state } = record;
+      if (state === 'synced') {
+        continue;
+      }
+      if (state === 'delete') {
+        await remote.deleteAsset(id);
       } else {
-        const asset = await target.getAsset(record.id);
+        const asset = await target.getAsset(id);
         if (asset) {
           await remote.uploadAsset(
-            record.id,
+            id,
             await sealAsset(cipher, asset.meta, asset.blob),
           );
         }
       }
-      await mark(() => meta.settleAsset(record.id, record.state));
+      await mark(() => meta.settleAsset(id, state));
     }
   };
 
@@ -240,7 +298,13 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
 
   const pushDesign = async (record: DesignSyncRecord) => {
     if (record.deleted && record.version === 0) {
-      // Never reached the server: nothing to tell it.
+      // We never saw the server accept it, but an insert can commit and
+      // lose its response: tombstone it if it's there, or it comes back.
+      const existing = await remote.fetchById(record.id);
+      if (existing && existing.deletedAt === null) {
+        await pushDesign({ ...record, version: existing.version });
+        return;
+      }
       await mark(() =>
         meta.updateDesign(record.id, (current) =>
           current?.deleted ? null : current,
@@ -268,12 +332,15 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
         // Still dirty if it changed (or was restored/deleted) mid-push.
         const changed = record.deleted
           ? !deleted
-          : deleted || target.getDocument(record.id) !== document;
+          : deleted ||
+            target.getDocument(record.id) !== document ||
+            (current?.rev ?? 0) !== (record.rev ?? 0);
         return {
           id: record.id,
           version: saved.version,
           dirty: changed,
           deleted,
+          ...(current?.rev === undefined ? {} : { rev: current.rev }),
         };
       }),
     );
@@ -283,6 +350,7 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
 
   const downloadMissingAssets = async (document: DesignDocument) => {
     for (const id of referencedAssetIds(document)) {
+      checkpoint();
       if (target.hasAsset(id)) {
         continue;
       }
@@ -293,6 +361,9 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
       }
       try {
         const { meta: assetMeta, blob } = await openAsset(cipher, envelope);
+        if (assetMeta.id !== id || !IMAGE_TYPES.has(assetMeta.mimeType)) {
+          throw new Error('image metadata doesn’t match the request');
+        }
         await target.applyRemoteAsset(assetMeta, blob);
       } catch (error) {
         logger.error('sync.asset_unreadable', { assetId: id, error });
@@ -322,28 +393,41 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
     }
   };
 
-  const applyRemote = async (design: RemoteDesign) => {
+  /**
+   * Applies a server row. With a guard (a normal pull), it applies only if
+   * the local copy didn't change since the decision and returns false
+   * otherwise; without one (after a conflict copy) the server always wins.
+   */
+  const applyRemote = async (
+    design: RemoteDesign,
+    guard?: TargetGuard & { rev: number },
+  ): Promise<boolean> => {
     const settled = (deleted: boolean) =>
       mark(() =>
-        meta.updateDesign(design.id, () => ({
-          id: design.id,
-          version: design.version,
-          dirty: false,
-          deleted,
-        })),
+        meta.updateDesign(design.id, (current) =>
+          // A save that landed meanwhile stays dirty, to be pushed.
+          guard && current?.dirty && (current.rev ?? 0) !== guard.rev
+            ? { ...current, version: design.version }
+            : { id: design.id, version: design.version, dirty: false, deleted },
+        ),
       );
     if (design.deletedAt !== null) {
-      await target.removeRemoteDocument(design.id);
+      if (!(await target.removeRemoteDocument(design.id, guard))) {
+        return false;
+      }
       await settled(true);
-      return;
+      return true;
     }
     const document = await openRemote(design);
     if (!document) {
-      return;
+      return true;
     }
     await downloadMissingAssets(document);
-    await target.applyRemoteDocument(document);
+    if (!(await target.applyRemoteDocument(document, guard))) {
+      return false;
+    }
     await settled(false);
+    return true;
   };
 
   /** Server wins; the local edit survives as its own design. */
@@ -354,17 +438,29 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
       localVersion: local.version,
       remoteVersion: server?.version ?? null,
     });
-    // Opened first: an unreadable server copy stops here, before any copy
-    // is made, so retries can't pile up duplicates.
+    // Everything that can fail (opening, image downloads) happens before
+    // the copy, and the copy is recorded, so retries never duplicate it.
     const serverDocument =
       server && server.deletedAt === null ? await openRemote(server) : null;
+    if (serverDocument) {
+      await downloadMissingAssets(serverDocument);
+    }
+    const copyKey = server?.version ?? -1;
+    const alreadyCopied =
+      (await meta.getDesign(local.id))?.copiedFor === copyKey;
     const mine = target.getDocument(local.id);
     if (
       mine &&
       !local.deleted &&
+      !alreadyCopied &&
       JSON.stringify(serverDocument) !== JSON.stringify(mine)
     ) {
       await target.createConflictCopy(mine);
+      await mark(() =>
+        meta.updateDesign(local.id, (current) =>
+          current ? { ...current, copiedFor: copyKey } : current,
+        ),
+      );
     }
     if (!server) {
       // The id can't be used remotely; the copy above carries the work.
@@ -392,18 +488,29 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
   };
 
   const applyPulled = async (design: RemoteDesign): Promise<boolean> => {
+    // Marks from saves that just finished must land before we decide.
+    await marks;
     const local = await meta.getDesign(design.id);
     if (local && design.version <= local.version) {
       // Our own push echoing back, or already applied.
       return false;
     }
-    if (local?.dirty || target.hasUnsavedChanges(design.id)) {
-      await resolveConflict(
+    const conflict = () =>
+      resolveConflict(
         local ?? { id: design.id, version: 0, dirty: true, deleted: false },
       );
+    if (local?.dirty || target.hasUnsavedChanges(design.id)) {
+      await conflict();
       return true;
     }
-    await applyRemote(design);
+    const applied = await applyRemote(design, {
+      current: target.getDocument(design.id),
+      rev: local?.rev ?? 0,
+    });
+    if (!applied) {
+      // An edit arrived while we downloaded: keep both.
+      await conflict();
+    }
     return true;
   };
 
@@ -411,8 +518,10 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
     let cursor = rewound(await meta.getCursor());
     let changed = 0;
     for (;;) {
+      checkpoint();
       const page = await remote.fetchChangedSince(cursor, pageSize);
       for (const design of page) {
+        checkpoint();
         if (await applyPulled(design)) {
           changed += 1;
         }
@@ -424,6 +533,37 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
       if (page.length < pageSize) {
         return changed;
       }
+    }
+  };
+
+  /**
+   * Designs and images stored before sync bookkeeping existed (or whose
+   * mark failed) get queued, so nothing stays on one device by accident.
+   */
+  const reconcile = async () => {
+    const knownDesigns = new Set(await meta.listDesignIds());
+    const knownAssets = new Set(await meta.listAssetIds());
+    const designs = target
+      .listDocumentIds()
+      .filter((id) => !knownDesigns.has(id));
+    const assets = target.listAssetIds().filter((id) => !knownAssets.has(id));
+    for (const id of designs) {
+      await mark(() =>
+        meta.updateDesign(
+          id,
+          (current) =>
+            current ?? { id, version: 0, dirty: true, deleted: false, rev: 1 },
+        ),
+      );
+    }
+    for (const id of assets) {
+      await mark(() => meta.setAsset({ id, state: 'upload' }));
+    }
+    if (designs.length + assets.length > 0) {
+      logger.info('sync.reconciled', {
+        designs: designs.length,
+        assets: assets.length,
+      });
     }
   };
 
@@ -444,10 +584,12 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
       await pushAssets();
       const dirty = await meta.listDirtyDesigns();
       for (const record of dirty) {
+        checkpoint();
         await pushDesign(record);
       }
       const pulled = await pull();
       attempt = 0;
+      clearRetry();
       store.setState({
         status: 'synced',
         lastSyncedAt: deps.now(),
@@ -459,6 +601,9 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
         durationMs: deps.now() - startedAt,
       });
     } catch (error) {
+      if (error instanceof SyncStopped) {
+        return;
+      }
       const offline = !connectivity.isOnline();
       logger.warn('sync.failed', { offline, attempt, error });
       store.setState({
@@ -469,7 +614,10 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
         scheduleRetry();
       }
     } finally {
-      await refreshPending();
+      // Read through a call: `disposed` changes across the awaits above.
+      if (!isDisposed()) {
+        await refreshPending();
+      }
     }
   };
 
@@ -517,19 +665,14 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
       }
       started = true;
       cleanups.push(
-        remote.subscribe(
-          () => {
-            requestSync(0);
-          },
-          (status: RealtimeStatus) => {
-            const live = status === 'connected';
-            store.setState({ live });
-            if (live) {
-              // Catch up on anything missed while disconnected.
-              requestSync(0);
-            }
-          },
-        ),
+        remote.subscribe(nudge, (status: RealtimeStatus) => {
+          const live = status === 'connected';
+          store.setState({ live });
+          if (live) {
+            // Catch up on anything missed while disconnected.
+            nudge();
+          }
+        }),
         connectivity.subscribe(() => {
           if (connectivity.isOnline()) {
             attempt = 0;
@@ -539,10 +682,12 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
           }
         }),
       );
-      pollTimer = setInterval(() => {
-        requestSync(0);
-      }, pollIntervalMs);
-      void syncNow();
+      pollTimer = setInterval(nudge, pollIntervalMs);
+      void reconcile()
+        .catch((error: unknown) => {
+          logger.error('sync.reconcile_failed', { error });
+        })
+        .then(syncNow);
     },
 
     enqueue: (document) => {
@@ -552,6 +697,10 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
           version: current?.version ?? 0,
           dirty: true,
           deleted: false,
+          rev: (current?.rev ?? 0) + 1,
+          ...(current?.copiedFor === undefined
+            ? {}
+            : { copiedFor: current.copiedFor }),
         })),
       ).then(afterMark);
     },
@@ -559,7 +708,14 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
     markDeleted: (id) => {
       void mark(() =>
         meta.updateDesign(id, (current) =>
-          current ? { ...current, dirty: true, deleted: true } : null,
+          current
+            ? {
+                ...current,
+                dirty: true,
+                deleted: true,
+                rev: (current.rev ?? 0) + 1,
+              }
+            : null,
         ),
       ).then(afterMark);
     },
@@ -576,18 +732,21 @@ export function createSyncEngine(deps: SyncEngineDependencies): SyncEngine {
 
     retryNow: () => {
       attempt = 0;
-      clearTimeout(retryTimer);
+      clearRetry();
       void syncNow();
     },
 
     dispose: async () => {
       disposed = true;
       clearTimeout(debounceTimer);
-      clearTimeout(retryTimer);
+      clearRetry();
       clearInterval(pollTimer);
       for (const cleanup of cleanups.splice(0)) {
         cleanup();
       }
+      // A pass in flight stops at its next checkpoint; wait for it so
+      // nothing touches the cloud or the database after this resolves.
+      await running;
       await marks;
     },
   };

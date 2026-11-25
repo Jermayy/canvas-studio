@@ -39,11 +39,13 @@ export interface SyncDesignRow {
   /** 0/1 so it can be indexed. */
   dirty: 0 | 1;
   deleted: 0 | 1;
+  rev?: number;
+  copiedFor?: number;
 }
 
 export interface SyncAssetRow {
   id: string;
-  state: 'upload' | 'delete';
+  state: 'upload' | 'delete' | 'synced';
 }
 
 export interface SyncValueRow {

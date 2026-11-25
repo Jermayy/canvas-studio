@@ -14,9 +14,14 @@ export interface DesignSyncRecord {
   dirty: boolean;
   /** Deleted on this device (or remotely); kept so a restore can resurrect it. */
   deleted: boolean;
+  /** Bumped by every local save, so a pass can tell if one landed meanwhile. */
+  rev?: number;
+  /** Server version a conflict copy was already made for (no duplicates on retry). */
+  copiedFor?: number;
 }
 
-export type AssetSyncState = 'upload' | 'delete';
+/** `synced` records stay, so reconciliation knows the image is in the cloud. */
+export type AssetSyncState = 'upload' | 'delete' | 'synced';
 
 export interface AssetSyncRecord {
   id: string;
@@ -31,10 +36,18 @@ export interface SyncMetaStore {
     change: (current: DesignSyncRecord | null) => DesignSyncRecord | null,
   ) => Promise<void>;
   listDirtyDesigns: () => Promise<DesignSyncRecord[]>;
+  /** Every design with a record (reconciliation). */
+  listDesignIds: () => Promise<string[]>;
   setAsset: (record: AssetSyncRecord) => Promise<void>;
-  /** Clears the record only if it's still in `state` (a newer mark wins). */
-  settleAsset: (id: string, state: AssetSyncState) => Promise<void>;
+  /**
+   * Finishes a pending upload (→ `synced`) or delete (record removed), only
+   * if the record is still in `state`: a newer mark wins.
+   */
+  settleAsset: (id: string, state: 'upload' | 'delete') => Promise<void>;
+  /** Uploads and deletes still to do. */
   listPendingAssets: () => Promise<AssetSyncRecord[]>;
+  /** Every image with a record, synced or not (reconciliation). */
+  listAssetIds: () => Promise<string[]>;
   getCursor: () => Promise<PullCursor | null>;
   setCursor: (cursor: PullCursor) => Promise<void>;
 }
@@ -56,17 +69,26 @@ export function createMemorySyncMetaStore(): SyncMetaStore {
     },
     listDirtyDesigns: () =>
       Promise.resolve([...designs.values()].filter((record) => record.dirty)),
+    listDesignIds: () => Promise.resolve([...designs.keys()]),
     setAsset: (record) => {
       assets.set(record.id, record);
       return Promise.resolve();
     },
     settleAsset: (id, state) => {
       if (assets.get(id)?.state === state) {
-        assets.delete(id);
+        if (state === 'upload') {
+          assets.set(id, { id, state: 'synced' });
+        } else {
+          assets.delete(id);
+        }
       }
       return Promise.resolve();
     },
-    listPendingAssets: () => Promise.resolve([...assets.values()]),
+    listPendingAssets: () =>
+      Promise.resolve(
+        [...assets.values()].filter((record) => record.state !== 'synced'),
+      ),
+    listAssetIds: () => Promise.resolve([...assets.keys()]),
     getCursor: () => Promise.resolve(cursor),
     setCursor: (next) => {
       cursor = next;
