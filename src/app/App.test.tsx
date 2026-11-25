@@ -439,6 +439,22 @@ describe('App', () => {
     );
     await within(reopened).findByRole('button', { name: 'Create link' });
     expect(shares.shares.size).toBe(0);
+
+    // Deleting a shared design turns its link off too.
+    await user.click(
+      await within(reopened).findByRole('button', { name: 'Create link' }),
+    );
+    await within(reopened).findByRole('button', { name: 'Stop sharing' });
+    expect(shares.shares.size).toBe(1);
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('link', { name: 'Back to projects' }));
+    await user.click(
+      await screen.findByRole('button', { name: 'Actions for Festive Dinner' }),
+    );
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    await waitFor(() => {
+      expect(shares.shares.size).toBe(0);
+    });
   });
 
   it('explains when a share link doesn’t exist', async () => {

@@ -108,11 +108,23 @@ describe('Supabase share store', () => {
       share_id: SHARE_ID,
     });
     expect(view?.imageUrl).toBe(
-      `https://cloud.example.test/public/${SHARE_ID}.png?v=2026-11-01T00%3A00%3A00Z`,
+      `https://cloud.example.test/sign/${SHARE_ID}.png?token=t`,
     );
     expect(await shares.fetchShared(SHARE_ID)).toBeNull();
     await expect(shares.fetchShared(SHARE_ID)).rejects.toThrow(
       'load shared design failed',
+    );
+  });
+
+  it('fails loudly when storage won’t sign the image (the share went away)', async () => {
+    const { shares, respond, bucket } = setup();
+    bucket.createSignedUrl.mockResolvedValueOnce({
+      data: null as never,
+      error: { message: 'Object not found' },
+    });
+    respond({ data: [ROW] });
+    await expect(shares.fetchShared(SHARE_ID)).rejects.toThrow(
+      'sign share image failed',
     );
   });
 

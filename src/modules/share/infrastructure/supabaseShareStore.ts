@@ -7,6 +7,12 @@ export const SHARES_BUCKET = 'workspace-shares';
 const COLUMNS = 'id, title, width, height, updated_at';
 /** Short, so a refreshed image shows up quickly through the CDN. */
 const IMAGE_CACHE_SECONDS = '60';
+/**
+ * The bucket is private: the public page gets a short-lived signed URL,
+ * which storage only issues while the share is live (migration
+ * 20261126000000), so deleting the design cuts access within minutes.
+ */
+const SIGNED_URL_SECONDS = 300;
 
 const shareRowSchema = z.object({
   id: z.uuid(),
@@ -43,11 +49,14 @@ export class ShareStoreError extends Error {
  * the public page reads through `get_workspace_share()` (exact token only).
  */
 export function createSupabaseShareStore(client: SupabaseClient): ShareStore {
-  const imageUrl = (share: Pick<DesignShare, 'id' | 'updatedAt'>) => {
-    const { data } = client.storage
+  const imageUrl = async (share: Pick<DesignShare, 'id'>) => {
+    const { data, error } = await client.storage
       .from(SHARES_BUCKET)
-      .getPublicUrl(shareImagePath(share.id));
-    return `${data.publicUrl}?v=${encodeURIComponent(share.updatedAt)}`;
+      .createSignedUrl(shareImagePath(share.id), SIGNED_URL_SECONDS);
+    if (error) {
+      throw new ShareStoreError('sign share image failed', error);
+    }
+    return data.signedUrl;
   };
 
   const getForDesign = async (designId: string) => {
@@ -134,7 +143,7 @@ export function createSupabaseShareStore(client: SupabaseClient): ShareStore {
         return null;
       }
       const share = toShare(row);
-      return { ...share, imageUrl: imageUrl(share) };
+      return { ...share, imageUrl: await imageUrl(share) };
     },
   };
 }

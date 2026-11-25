@@ -76,6 +76,42 @@ exception when check_violation then
 end $$;
 reset role;
 
+-- Designs: the server owns version and owner, and enforces +1 updates.
+select pg_temp.login('aaaaaaaa-0000-0000-0000-000000000001');
+insert into public.workspace_designs
+  (id, user_id, ciphertext, iv, version, client_updated_at)
+values ('dddddddd-0000-0000-0000-00000000000f',
+        'bbbbbbbb-0000-0000-0000-000000000002',
+        'Zg==', 'CCCCCCCCCCCCCCCC', 9, now());
+reset role;
+select pg_temp.assert(
+  (select user_id::text || version from public.workspace_designs
+   where id = 'dddddddd-0000-0000-0000-00000000000f')
+    = 'aaaaaaaa-0000-0000-0000-0000000000011',
+  'a forged owner or version on insert is replaced'
+);
+select pg_temp.login('aaaaaaaa-0000-0000-0000-000000000001');
+do $$ begin
+  update public.workspace_designs set ciphertext = 'Zw==', version = 3
+  where id = 'dddddddd-0000-0000-0000-00000000000f';
+  raise exception 'FAIL: skipped a design version';
+exception when sqlstate '40001' then
+  raise notice 'PASS: design updates must increase the version by one';
+end $$;
+update public.workspace_designs set ciphertext = 'aA==', version = 2
+where id = 'dddddddd-0000-0000-0000-00000000000f' and version = 1;
+-- A writer that read version 1 too now matches no row.
+update public.workspace_designs set ciphertext = 'c3RhbGU=', version = 2
+where id = 'dddddddd-0000-0000-0000-00000000000f' and version = 1;
+reset role;
+select pg_temp.assert(
+  (select ciphertext from public.workspace_designs
+   where id = 'dddddddd-0000-0000-0000-00000000000f') = 'aA==',
+  'a stale design update changes nothing'
+);
+delete from public.workspace_designs
+where id = 'dddddddd-0000-0000-0000-00000000000f';
+
 select pg_temp.login('bbbbbbbb-0000-0000-0000-000000000002');
 select pg_temp.assert(
   (select count(*) from public.workspace_designs) = 0,

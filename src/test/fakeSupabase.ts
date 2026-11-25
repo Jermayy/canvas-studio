@@ -73,9 +73,12 @@ export function createFakeSupabase() {
         error: null as FakeResult['error'],
       }),
     ),
-    getPublicUrl: vi.fn((path: string) => ({
-      data: { publicUrl: `https://cloud.example.test/public/${path}` },
-    })),
+    createSignedUrl: vi.fn((path: string) =>
+      Promise.resolve({
+        data: { signedUrl: `https://cloud.example.test/sign/${path}?token=t` },
+        error: null as FakeResult['error'],
+      }),
+    ),
   };
 
   const channel: {

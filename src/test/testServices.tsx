@@ -160,7 +160,10 @@ export function createTestServices(
       createId,
       readImageSize: () => Promise.resolve({ width: 640, height: 480 }),
       onPersisted: sync?.enqueue,
-      onRemoved: sync?.markDeleted,
+      onRemoved: (id) => {
+        sync?.markDeleted(id);
+        void cloudOptions.shares?.unpublish(id);
+      },
       onAssetAdded: sync?.assetAdded,
       onAssetRemoved: sync?.assetRemoved,
       saveDelayMs: 10,

@@ -125,6 +125,8 @@ export async function composeBrowserServices(options: {
     logger: logger.child({ module: 'auth' }),
   });
 
+  const shares = client ? createSupabaseShareStore(client) : null;
+
   const openWorkspace: AppServices['openWorkspace'] = ({
     session,
     dataKey,
@@ -166,7 +168,17 @@ export async function composeBrowserServices(options: {
       createId,
       readImageSize,
       onPersisted: sync?.enqueue,
-      onRemoved: sync?.markDeleted,
+      onRemoved: (id) => {
+        sync?.markDeleted(id);
+        // A deleted design's link goes too (best effort: storage already
+        // refuses to serve it once the deletion syncs).
+        shares?.unpublish(id).catch((error: unknown) => {
+          workspaceLogger.warn('share.unpublish_on_delete_failed', {
+            documentId: id,
+            error,
+          });
+        });
+      },
       onAssetAdded: sync?.assetAdded,
       onAssetRemoved: sync?.assetRemoved,
     });
@@ -237,7 +249,7 @@ export async function composeBrowserServices(options: {
       browserLeaseLocks(),
       logger.child({ module: 'workspace' }),
     ),
-    shares: client ? createSupabaseShareStore(client) : null,
+    shares,
     cloudSync: client !== null,
     deleteAccount: ({ session, password, workspace }) =>
       deleteAccount(
