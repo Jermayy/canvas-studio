@@ -18,7 +18,15 @@ import { AuthPage } from '@/modules/auth/components/AuthPage';
 import { LandingPage } from '@/modules/landing/LandingPage';
 import { applyPreferences } from '@/modules/preferences/preferences';
 import { Toaster } from '@/shared/ui/Toaster';
-import { lazy, Suspense, useEffect, useEffectEvent, useState } from 'react';
+import { ElsewherePage } from '@/app/components/ElsewherePage';
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react';
 import { useStore } from 'zustand';
 
 // Route-level code splitting: the editor (and jsPDF behind it) only loads
@@ -31,7 +39,9 @@ const SharedDesignPage = lazy(() => import('@/modules/share/SharedDesignPage'));
 type AuthState =
   | { status: 'restoring' }
   | { status: 'signed-out' }
-  | { status: 'signed-in'; stored: StoredSession; workspace: Workspace };
+  | { status: 'signed-in'; stored: StoredSession; workspace: Workspace }
+  /** Signed in, but another tab holds the workspace (one active tab). */
+  | { status: 'elsewhere'; stored: StoredSession };
 
 /** Keeps preferences applied to <html> (theme, accent, density, scale). */
 function PreferencesEffect({ services }: { services: AppServices }) {
@@ -88,33 +98,25 @@ function routeNeedsAccount(
   return route.name === 'projects' || route.name === 'studio';
 }
 
-/** Runs `onEnd` once on mount (ending a session before a reset link). */
-function EndSessionForReset({ onEnd }: { onEnd: () => Promise<void> }) {
-  const end = useEffectEvent(onEnd);
-  useEffect(() => {
-    void end();
-  }, []);
-  return <FullScreenLoader label="Opening your reset link…" />;
-}
-
 function Routes({
   route,
   auth,
   onAuthenticated,
-  onResetLinkWhileSignedIn,
+  onUseHere,
 }: {
   route: Route;
   auth: AuthState;
   onAuthenticated: (success: AuthSuccess, next: string) => void;
-  onResetLinkWhileSignedIn: () => Promise<void>;
+  onUseHere: () => Promise<void>;
 }) {
   const location = useLocation();
+  const signedIn = auth.status === 'signed-in' || auth.status === 'elsewhere';
   switch (route.name) {
     case 'landing':
-      return <LandingPage signedIn={auth.status === 'signed-in'} />;
+      return <LandingPage signedIn={signedIn} />;
     case 'sign-in':
     case 'sign-up':
-      if (auth.status === 'signed-in') {
+      if (signedIn) {
         return <Redirect to={route.next} />;
       }
       return (
@@ -130,12 +132,10 @@ function Routes({
         />
       );
     case 'reset-password':
-      // A reset link (with a code) wins over the current session: whoever
-      // opened it proved access to the account's email.
-      if (auth.status === 'signed-in' && route.code) {
-        return <EndSessionForReset onEnd={onResetLinkWhileSignedIn} />;
-      }
-      if (auth.status === 'signed-in') {
+      // A reset link (with a code) opens the reset form even when signed
+      // in; the current session is replaced only once the reset succeeds,
+      // so a bad or foreign link changes nothing.
+      if (signedIn && !route.code) {
         return <Redirect to="/projects" />;
       }
       return (
@@ -167,6 +167,9 @@ function Routes({
     const next = encodeURIComponent(location.pathname + location.search);
     return <Redirect to={`/sign-in?next=${next}`} />;
   }
+  if (auth.status === 'elsewhere') {
+    return <ElsewherePage onUseHere={onUseHere} />;
+  }
   return (
     <WorkspaceContext value={auth.workspace}>
       {route.name === 'projects' ? (
@@ -185,27 +188,78 @@ export function App({ services }: { services: AppServices }) {
   // Shown once, right after the keyring issues a code.
   const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
   const workspace = auth.status === 'signed-in' ? auth.workspace : null;
+  const stored =
+    auth.status === 'signed-in' || auth.status === 'elsewhere'
+      ? auth.stored
+      : null;
+  // The open workspace and its lease, for callbacks that outlive a render.
+  const active = useRef<{ workspace: Workspace; release: () => void } | null>(
+    null,
+  );
 
   useFlushOnHide(workspace);
 
-  const open = (stored: StoredSession) => {
-    const opened = services.openWorkspace(stored);
-    void opened.store.getState().load();
-    setAuth({ status: 'signed-in', stored, workspace: opened });
+  /** Saves and closes the open workspace and gives up its lease. */
+  const closeActive = async () => {
+    const current = active.current;
+    active.current = null;
+    if (!current) {
+      return;
+    }
+    try {
+      await current.workspace.close();
+    } finally {
+      current.release();
+    }
   };
+
+  // Plain function: it only uses the ref, setAuth and services (all stable).
+  const handedOver = async () => {
+    // Another tab pressed "Use here". Pending edits are saved first.
+    const current = active.current;
+    active.current = null;
+    await current?.workspace.close();
+    setAuth((previous) =>
+      previous.status === 'signed-in'
+        ? { status: 'elsewhere', stored: previous.stored }
+        : previous,
+    );
+    services.toasts
+      .getState()
+      .notify('Canvas Studio is now open in another tab.', { tone: 'info' });
+  };
+
+  /** Opens the account's workspace if no other tab holds it. */
+  const activate = async (next: StoredSession, steal = false) => {
+    const lease = await services.leases.acquire(next.session.userId, {
+      steal,
+      onLost: () => {
+        void handedOver();
+      },
+    });
+    if (lease.kind === 'busy') {
+      setAuth({ status: 'elsewhere', stored: next });
+      return;
+    }
+    const opened = services.openWorkspace(next);
+    active.current = { workspace: opened, release: lease.release };
+    void opened.store.getState().load();
+    setAuth({ status: 'signed-in', stored: next, workspace: opened });
+  };
+
+  const restored = useEffectEvent((next: StoredSession | null) => {
+    if (next) {
+      void activate(next);
+    } else {
+      setAuth({ status: 'signed-out' });
+    }
+  });
 
   useEffect(() => {
     let cancelled = false;
-    void services.auth.restore().then((stored) => {
-      if (cancelled) {
-        return;
-      }
-      if (stored) {
-        const opened = services.openWorkspace(stored);
-        void opened.store.getState().load();
-        setAuth({ status: 'signed-in', stored, workspace: opened });
-      } else {
-        setAuth({ status: 'signed-out' });
+    void services.auth.restore().then((next) => {
+      if (!cancelled) {
+        restored(next);
       }
     });
     return () => {
@@ -214,10 +268,10 @@ export function App({ services }: { services: AppServices }) {
   }, [services]);
 
   const signOut = async (reason?: string) => {
-    if (auth.status !== 'signed-in') {
+    if (!stored) {
       return;
     }
-    await auth.workspace.close();
+    await closeActive();
     await services.auth.signOut();
     setAuth({ status: 'signed-out' });
     navigate('/', { replace: true });
@@ -235,24 +289,37 @@ export function App({ services }: { services: AppServices }) {
   const deleteAccount = async (
     password: string,
   ): Promise<DeleteAccountResult> => {
-    if (auth.status !== 'signed-in') {
+    const current = active.current;
+    if (auth.status !== 'signed-in' || !current) {
       return {
         ok: false,
         message: 'You’re not signed in.',
         workspaceClosed: false,
       };
     }
-    const result = await services.deleteAccount({
-      session: auth.stored.session,
-      password,
-      workspace: auth.workspace,
-    });
+    let result: DeleteAccountResult;
+    try {
+      result = await services.deleteAccount({
+        session: auth.stored.session,
+        password,
+        workspace: current.workspace,
+      });
+    } catch (error) {
+      services.logger.error('account.delete_crashed', { error });
+      result = {
+        ok: false,
+        message: 'Your account wasn’t fully deleted. Sign in and try again.',
+        workspaceClosed: true,
+      };
+    }
     if (!result.ok && !result.workspaceClosed) {
       return result;
     }
+    active.current = null;
+    current.release();
     if (!result.ok) {
       // Half-finished: the workspace is closed, so sign out and say why.
-      await services.auth.signOut();
+      await services.auth.signOut().catch(() => undefined);
     }
     setAuth({ status: 'signed-out' });
     navigate('/', { replace: true });
@@ -268,8 +335,7 @@ export function App({ services }: { services: AppServices }) {
   };
 
   // Sessions end on time even if the tab stays open.
-  const expiresAt =
-    auth.status === 'signed-in' ? auth.stored.session.expiresAt : null;
+  const expiresAt = stored ? stored.session.expiresAt : null;
   const onExpired = useEffectEvent(() => {
     void signOut('Your session expired. Sign in again to continue.');
   });
@@ -291,7 +357,7 @@ export function App({ services }: { services: AppServices }) {
       <PreferencesEffect services={services} />
       <SessionContext
         value={{
-          session: auth.status === 'signed-in' ? auth.stored.session : null,
+          session: stored ? stored.session : null,
           signOut: () => signOut(),
           deleteAccount,
         }}
@@ -302,17 +368,16 @@ export function App({ services }: { services: AppServices }) {
               route={route}
               auth={auth}
               onAuthenticated={(success, next) => {
-                open(success.stored);
+                // A reset from a link while signed in replaces the session.
+                void closeActive().then(() => activate(success.stored));
                 setRecoveryCode(success.recoveryCode);
                 navigate(next, { replace: true });
               }}
-              onResetLinkWhileSignedIn={async () => {
-                if (auth.status !== 'signed-in') {
-                  return;
+              onUseHere={() => {
+                if (auth.status !== 'elsewhere') {
+                  return Promise.resolve();
                 }
-                await auth.workspace.close();
-                await services.auth.endLocalSession();
-                setAuth({ status: 'signed-out' });
+                return activate(auth.stored, true);
               }}
             />
           </Suspense>

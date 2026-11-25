@@ -58,12 +58,6 @@ export interface AuthService {
   }) => Promise<AuthSuccess>;
   signUp: (input: SignUpInput & { remember: boolean }) => Promise<SignUpResult>;
   signOut: () => Promise<void>;
-  /**
-   * Ends this app's session only (key and session vault), keeping the
-   * provider's state. Used before a reset link: a Supabase sign-out would
-   * also delete the PKCE verifier the link needs.
-   */
-  endLocalSession: () => Promise<void>;
   /** Device-local accounts: email + recovery code + new password. */
   resetWithRecoveryCode: (
     input: ResetInput & { email: string },
@@ -285,11 +279,6 @@ export function createAuthService(deps: {
         logger.warn('auth.remote_sign_out_failed', { error });
       }
       logger.info('auth.signed_out', { provider: identity.kind });
-    },
-
-    endLocalSession: async () => {
-      await vault.clear();
-      logger.info('auth.local_session_ended', { provider: identity.kind });
     },
 
     resetWithRecoveryCode: async ({

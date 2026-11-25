@@ -55,6 +55,10 @@ import {
   type WorkspaceStore,
 } from '@/modules/workspace/state/workspaceStore';
 import { createAesGcmCipher } from '@/shared/crypto/aesGcm';
+import {
+  browserLeaseLocks,
+  createWorkspaceLeases,
+} from '@/modules/workspace/infrastructure/workspaceLease';
 import { createId } from '@/shared/lib/ids';
 import { createBrowserKeyValueStore } from '@/shared/lib/keyValueStore';
 import type { Logger } from '@/shared/logger';
@@ -229,6 +233,10 @@ export async function composeBrowserServices(options: {
     createId,
     openWorkspace,
     openSandbox,
+    leases: createWorkspaceLeases(
+      browserLeaseLocks(),
+      logger.child({ module: 'workspace' }),
+    ),
     shares: client ? createSupabaseShareStore(client) : null,
     cloudSync: client !== null,
     deleteAccount: ({ session, password, workspace }) =>

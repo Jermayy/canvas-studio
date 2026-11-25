@@ -5,6 +5,7 @@ import type { ExportDependencies } from '@/modules/export/application/exportDesi
 import type { FileDelivery } from '@/modules/export/infrastructure/fileDelivery';
 import type { PreferencesStore } from '@/modules/preferences/preferences';
 import type { ShareStore } from '@/modules/share/shareStore';
+import type { WorkspaceLeases } from '@/modules/workspace/infrastructure/workspaceLease';
 import type { SyncEngine } from '@/modules/sync/syncEngine';
 import type { WorkspaceStore } from '@/modules/workspace/state/workspaceStore';
 import type { Logger } from '@/shared/logger';
@@ -39,6 +40,8 @@ export interface AppServices {
   createId: () => string;
   openWorkspace: (stored: StoredSession) => Workspace;
   openSandbox: () => Workspace;
+  /** One active tab per account. */
+  leases: WorkspaceLeases;
   /** View-only share links; null without a cloud backend. */
   shares: ShareStore | null;
   /** True when designs sync to the cloud (Supabase accounts). */

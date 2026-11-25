@@ -1,8 +1,16 @@
 import { App } from '@/app/App';
 import { navigate } from '@/app/router';
 import { createFakeCloud, createFakeShareStore } from '@/test/fakeCloud';
+import { createFakeLockManager } from '@/test/fakeLocks';
 import { createTestServices, type TestCloudOptions } from '@/test/testServices';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const PASSWORD = 'Plenty-long-pass-42';
@@ -480,11 +488,10 @@ describe('App', () => {
     expect(screen.queryByText('Check your inbox')).toBeNull();
   });
 
-  it('opens the reset screen from a reset link even when already signed in', async () => {
+  it('opens the reset screen from a reset link without ending the current session', async () => {
     const { user, services } = start('/sign-up');
     await screen.findByRole('heading', { name: 'Create your studio' });
     await signUp(user);
-    const endLocalSession = vi.spyOn(services.auth, 'endLocalSession');
     const signOut = vi.spyOn(services.auth, 'signOut');
 
     // Without a link, a signed-in user has nothing to reset here.
@@ -499,9 +506,56 @@ describe('App', () => {
     expect(
       await screen.findByRole('heading', { name: 'Reset your password' }),
     ).toBeInTheDocument();
-    expect(window.location.search).toBe('?code=emailed-code');
-    expect(endLocalSession).toHaveBeenCalledTimes(1);
-    // A provider sign-out would delete the PKCE verifier the link needs.
+    // A bad or foreign link mustn't sign anyone out: nothing has changed yet.
     expect(signOut).not.toHaveBeenCalled();
+    act(() => {
+      navigate('/projects');
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Projects' }),
+    ).toBeInTheDocument();
+  });
+
+  it('lets only one tab edit an account, and hands over on “Use here”', async () => {
+    const locks = createFakeLockManager();
+    window.history.replaceState(null, '', '/sign-up');
+    const first = createTestServices({}, { locks });
+    render(<App services={first.services} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Create your studio' });
+    await signUp(user);
+    await user.click(screen.getByRole('button', { name: /Festive Dinner/ }));
+    await screen.findByRole('application');
+    cleanup();
+
+    // A second "tab" on the same account (sharing the lock manager and the
+    // first tab's session) finds the workspace taken.
+    const second = createTestServices(
+      {
+        auth: first.services.auth,
+        openWorkspace: first.services.openWorkspace,
+      },
+      { locks },
+    );
+    const firstSession = await first.services.auth.restore();
+    expect(firstSession).not.toBeNull();
+    const held = await first.services.leases.acquire(
+      firstSession?.session.userId ?? '',
+      { steal: false, onLost: vi.fn() },
+    );
+    expect(held.kind).toBe('busy');
+
+    window.history.replaceState(null, '', '/projects');
+    render(<App services={second.services} />);
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Canvas Studio is open in another tab',
+      }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Use here' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Projects' }),
+    ).toBeInTheDocument();
+    await screen.findByText('1 design');
   });
 });

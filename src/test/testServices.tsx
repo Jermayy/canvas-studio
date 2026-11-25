@@ -37,7 +37,12 @@ import { createAesGcmCipher } from '@/shared/crypto/aesGcm';
 import { createMemoryKeyValueStore } from '@/shared/lib/keyValueStore';
 import { createLogger } from '@/shared/logger';
 import { createToastStore } from '@/shared/ui/toastStore';
+import {
+  createWorkspaceLeases,
+  type LeaseLockManager,
+} from '@/modules/workspace/infrastructure/workspaceLease';
 import type { FakeCloud } from '@/test/fakeCloud';
+import { createFakeLockManager } from '@/test/fakeLocks';
 import { NOW } from '@/test/factories';
 import { render, type RenderResult } from '@testing-library/react';
 import type { ReactNode } from 'react';
@@ -77,6 +82,8 @@ export interface TestCloudOptions {
   /** Signed-in workspaces sync to this fake cloud (like Supabase mode). */
   cloud?: FakeCloud;
   shares?: ShareStore;
+  /** Share one between several Apps to simulate tabs. */
+  locks?: LeaseLockManager;
 }
 
 export function createTestServices(
@@ -218,6 +225,10 @@ export function createTestServices(
     openWorkspace: ({ session, dataKey }) =>
       openWith('account', session.userId, dataKey),
     openSandbox: () => openWith('sandbox'),
+    leases: createWorkspaceLeases(
+      cloudOptions.locks ?? createFakeLockManager(),
+      logger,
+    ),
     shares: cloudOptions.shares ?? null,
     cloudSync: cloudOptions.cloud !== undefined,
     deleteAccount: ({ session, password, workspace }) =>

@@ -697,18 +697,6 @@ describe('auth service', () => {
     ).rejects.toMatchObject({ code: 'invalid-credentials' });
   });
 
-  it('ends only its own session for a reset link, leaving the provider alone', async () => {
-    const { service, identity, vault } = await setup();
-    await service.signIn({
-      email: 'a@x.test',
-      password: PASSWORD,
-      remember: false,
-    });
-    await service.endLocalSession();
-    expect(await vault.load()).toBeNull();
-    expect(identity.signOut).not.toHaveBeenCalled();
-  });
-
   it('deletes the identity, the wrapped key and the stored session', async () => {
     const { service, identity, keyring, vault } = await setup();
     await service.signIn({
