@@ -631,7 +631,7 @@ describe('sealed envelopes', () => {
 
 /** A promise you resolve from outside (to hold a remote call mid-flight). */
 function deferred() {
-  let release = () => undefined as void;
+  let release: () => void = () => undefined;
   const promise = new Promise<void>((resolve) => {
     release = resolve;
   });
