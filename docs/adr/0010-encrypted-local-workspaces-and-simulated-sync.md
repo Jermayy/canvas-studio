@@ -1,6 +1,6 @@
 # 0010 · Encrypted local workspaces, device-local accounts and simulated cloud sync (v2)
 
-- **Status:** Accepted
+- **Status:** Accepted; the simulated-sync part is superseded by ADR 0012
 - **Date:** 2026-11-20
 - **Relates to:** ADR 0002 (Supabase), 0003 (local-first sync), 0006 (browser session storage), 0008 (share links)
 
