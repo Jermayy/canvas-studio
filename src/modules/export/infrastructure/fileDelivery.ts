@@ -16,6 +16,7 @@ export interface FileDelivery {
   }) => Promise<ShareOutcome>;
   canCopyImage: () => boolean;
   copyImage: (png: Blob) => Promise<void>;
+  copyText: (text: string) => Promise<void>;
   openEmailDraft: (mailtoUrl: string) => void;
 }
 
@@ -89,6 +90,10 @@ export function createFileDelivery(env: DeliveryEnvironment): FileDelivery {
       await env.navigator.clipboard.write([
         new ClipboardItem({ 'image/png': png }),
       ]);
+    },
+
+    copyText: async (text) => {
+      await env.navigator.clipboard.writeText(text);
     },
 
     openEmailDraft: (mailtoUrl) => {

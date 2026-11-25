@@ -397,6 +397,19 @@
   gap: 0.75rem;
 }
 
+.auth-card__confirm-hint {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: 0.875rem;
+}
+
+.auth-card__confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+
 .auth-card__confirm-icon {
   display: grid;
   place-items: center;
@@ -950,6 +963,20 @@
   text-transform: uppercase;
 }
 
+.settings-section--danger .settings-section__title {
+  color: var(--color-danger);
+}
+
+.settings-section > .btn {
+  justify-self: start;
+}
+
+.settings-section__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .accent-picker {
   display: flex;
   gap: 0.6rem;
@@ -1071,6 +1098,12 @@
 
 .share-card--wide > .btn {
   justify-self: start;
+}
+
+.share-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .share-card__title {
@@ -1234,4 +1267,53 @@
 .centered-page .auth-card {
   display: grid;
   gap: 1rem;
+}
+
+/* Public share page (/s/<token>) */
+.shared-page {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 1.5rem;
+  min-height: 100vh;
+  padding: 1.5rem 1rem 3rem;
+  background: var(--color-bg);
+}
+
+.shared-page__header {
+  justify-self: stretch;
+  max-width: 64rem;
+  width: 100%;
+  margin-inline: auto;
+}
+
+.shared-page__design {
+  display: grid;
+  justify-items: center;
+  gap: 1rem;
+  width: 100%;
+  max-width: 64rem;
+}
+
+.shared-page__title {
+  margin: 0;
+  font-size: 1.5rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.shared-page__image {
+  max-width: 100%;
+  max-height: 75vh;
+  width: auto;
+  height: auto;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  background: var(--color-surface-2);
+}
+
+.shared-page__footer {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: 0.875rem;
 }

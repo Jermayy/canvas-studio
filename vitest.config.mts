@@ -50,6 +50,15 @@ export default defineConfig({
         'src/modules/**/state/**': { lines: 90, branches: 80 },
         'src/modules/**/data/**': { lines: 90, branches: 80 },
         'src/modules/sync/syncEngine.ts': { lines: 90, branches: 80 },
+        'src/modules/sync/infrastructure/**': { lines: 90, branches: 80 },
+        'src/modules/sync/envelope.ts': { lines: 90 },
+        'src/modules/account/*.ts': { lines: 90, branches: 80 },
+        'src/modules/account/infrastructure/**': { lines: 90 },
+        'src/modules/share/infrastructure/**': { lines: 90 },
+        'src/modules/auth/infrastructure/wrappedKeyStores.ts': {
+          lines: 90,
+          branches: 80,
+        },
         'src/modules/export/infrastructure/fileDelivery.ts': {
           lines: 90,
           branches: 85,

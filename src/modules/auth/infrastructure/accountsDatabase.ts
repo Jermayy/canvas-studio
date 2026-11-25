@@ -1,3 +1,4 @@
+import type { WrappedKey } from '@/modules/auth/application/ports';
 import type { Session } from '@/modules/auth/domain/authModel';
 import Dexie, { type Table } from 'dexie';
 
@@ -17,17 +18,12 @@ export interface LocalAccountRow {
   createdAt: string;
 }
 
-export interface WrappedKey {
-  salt: string;
-  iterations: number;
-  iv: string;
-  wrapped: string;
-}
-
 /** The data key wrapped by the password, and (since v2.1) by a recovery code. */
 export interface WrappedKeyRow extends WrappedKey {
   userId: string;
   recovery?: WrappedKey;
+  /** Absent on rows written before optimistic concurrency (treated as 1). */
+  version?: number;
 }
 
 export interface SessionRow {

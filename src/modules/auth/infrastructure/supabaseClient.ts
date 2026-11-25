@@ -1,5 +1,4 @@
 import type { SupabaseConfig } from '@/app/config';
-import type { SupabaseAuthClient } from '@/modules/auth/infrastructure/supabaseIdentityProvider';
 import { createClient } from '@supabase/supabase-js';
 
 export const REQUEST_TIMEOUT_MS = 15_000;
@@ -20,10 +19,14 @@ export function fetchWithTimeout(
   };
 }
 
-export function createSupabaseAuthClient(
+/** Untyped database schema: adapters validate every row with zod. */
+export type BrowserSupabaseClient = ReturnType<typeof createClient>;
+
+/** One client for auth, sync, share links and account deletion. */
+export function createSupabaseBrowserClient(
   config: SupabaseConfig,
   storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>,
-): SupabaseAuthClient {
+): BrowserSupabaseClient {
   return createClient(config.url, config.publishableKey, {
     auth: {
       storage,

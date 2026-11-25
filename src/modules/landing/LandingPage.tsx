@@ -21,17 +21,17 @@ const FEATURES: readonly { icon: UiIconName; title: string; text: string }[] = [
   {
     icon: 'shield',
     title: 'Private by design',
-    text: 'Your designs are encrypted on your device with a key only your password unlocks.',
+    text: 'Designs and images are encrypted on your device with a key only your password unlocks, before anything syncs.',
   },
   {
     icon: 'share',
     title: 'Share anywhere',
-    text: 'Send through your device’s share sheet, draft an email, or copy the image straight to the clipboard.',
+    text: 'Share a view-only link, send through your device’s share sheet, draft an email, or copy the image to the clipboard.',
   },
   {
     icon: 'cloud',
     title: 'Saves as you go',
-    text: 'Every change saves instantly to this browser and syncs in the background, with clear status at all times.',
+    text: 'Every change saves instantly to this browser and syncs to your other devices in the background, with clear status at all times.',
   },
   {
     icon: 'palette',
@@ -133,8 +133,8 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
           <h2 id="privacy-title">Your data</h2>
           <p>
             {auth.providerKind === 'local'
-              ? 'Canvas Studio keeps your account and designs in this browser. Designs are encrypted at rest with a key derived from your password; nothing is sent to a server, and cloud sync in this version is a simulation for demonstration.'
-              : 'Your email and a password hash are stored by Supabase Auth in Sydney. Your designs stay in this browser, encrypted with a key derived from your password; cloud sync in this version is a simulation for demonstration.'}{' '}
+              ? 'Canvas Studio keeps your account and designs in this browser. Designs are encrypted at rest with a key derived from your password, and nothing is sent to a server.'
+              : 'Your email and a password hash are stored by Supabase Auth in Sydney. Designs and images are encrypted in your browser before they sync to Supabase (Sydney), together with your encryption key wrapped by your password and recovery code, so the server stores only data it can’t read. A design you share by link publishes its name and an image of it until you turn the link off. You can delete your account and all its data at any time.'}{' '}
             Interface preferences are kept in local storage. No analytics or
             tracking.
           </p>

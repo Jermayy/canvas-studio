@@ -16,6 +16,23 @@ export interface AssetMeta {
   createdAt: string;
 }
 
+/** Shape check for asset metadata read back from storage. */
+export function isAssetMeta(value: unknown): value is AssetMeta {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.name === 'string' &&
+    typeof record.mimeType === 'string' &&
+    typeof record.width === 'number' &&
+    typeof record.height === 'number' &&
+    typeof record.size === 'number' &&
+    typeof record.createdAt === 'string'
+  );
+}
+
 export interface LoadedDocuments {
   documents: DesignDocument[];
   /** Records that couldn't be decrypted or failed validation. */

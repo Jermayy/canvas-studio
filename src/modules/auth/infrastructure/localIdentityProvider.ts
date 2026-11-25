@@ -111,5 +111,9 @@ export function createLocalIdentityProvider(options: {
     requestPasswordReset: () => Promise.reject(new AuthError('unknown')),
     exchangeResetCode: () =>
       Promise.reject(new AuthError('reset-link-invalid')),
+
+    deleteAccount: async (userId) => {
+      await options.db.accounts.delete(userId);
+    },
   };
 }

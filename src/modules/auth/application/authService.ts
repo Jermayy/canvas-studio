@@ -58,6 +58,12 @@ export interface AuthService {
   }) => Promise<AuthSuccess>;
   signUp: (input: SignUpInput & { remember: boolean }) => Promise<SignUpResult>;
   signOut: () => Promise<void>;
+  /**
+   * Ends this app's session only (key and session vault), keeping the
+   * provider's state. Used before a reset link: a Supabase sign-out would
+   * also delete the PKCE verifier the link needs.
+   */
+  endLocalSession: () => Promise<void>;
   /** Device-local accounts: email + recovery code + new password. */
   resetWithRecoveryCode: (
     input: ResetInput & { email: string },
@@ -77,6 +83,13 @@ export interface AuthService {
     session: Session;
     password: string;
   }) => Promise<string>;
+  /** Proves the password with the provider (throttled like sign-in). */
+  verifyPassword: (input: {
+    session: Session;
+    password: string;
+  }) => Promise<void>;
+  /** Deletes the account, its wrapped key and this device's session. */
+  deleteIdentity: (session: Session) => Promise<void>;
 }
 
 const THROTTLE_PREFIX = 'canvas-studio-v2:throttle:';
@@ -274,6 +287,11 @@ export function createAuthService(deps: {
       logger.info('auth.signed_out', { provider: identity.kind });
     },
 
+    endLocalSession: async () => {
+      await vault.clear();
+      logger.info('auth.local_session_ended', { provider: identity.kind });
+    },
+
     resetWithRecoveryCode: async ({
       email,
       recoveryCode,
@@ -392,6 +410,36 @@ export function createAuthService(deps: {
         });
         throw asAuthError(error);
       }
+    },
+
+    verifyPassword: async ({ session, password }) => {
+      const throttleKey = THROTTLE_PREFIX + session.email;
+      guard(throttleKey);
+      try {
+        const who = await identity.signIn(session.email, password);
+        if (who.userId !== session.userId) {
+          throw new AuthError('invalid-credentials');
+        }
+        deps.throttleStore.remove(throttleKey);
+      } catch (error) {
+        if (
+          error instanceof AuthError &&
+          error.code === 'invalid-credentials'
+        ) {
+          fail(throttleKey);
+        }
+        throw asAuthError(error);
+      }
+    },
+
+    deleteIdentity: async (session) => {
+      await identity.deleteAccount(session.userId);
+      await keyring.forget(session.userId);
+      await vault.clear();
+      logger.info('auth.account_deleted', {
+        provider: identity.kind,
+        userId: session.userId,
+      });
     },
 
     issueRecoveryCode: async ({ session, password }) => {

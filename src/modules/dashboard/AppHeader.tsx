@@ -54,7 +54,7 @@ export function AppHeader({ children }: { children?: ReactNode }) {
                 },
               },
               {
-                label: 'Password & recovery',
+                label: 'Account & security',
                 icon: 'shield',
                 onSelect: () => {
                   setSecurityOpen(true);

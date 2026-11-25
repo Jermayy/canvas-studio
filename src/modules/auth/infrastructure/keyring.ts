@@ -2,17 +2,16 @@ import type {
   Keyring,
   SessionVault,
   StoredSession,
+  WrappedKey,
+  WrappedKeyRecord,
+  WrappedKeyStore,
 } from '@/modules/auth/application/ports';
 import { AuthError } from '@/modules/auth/domain/authModel';
 import {
   generateRecoveryCode,
   normaliseRecoveryCode,
 } from '@/modules/auth/domain/recoveryCode';
-import type {
-  AccountsDatabase,
-  WrappedKey,
-  WrappedKeyRow,
-} from '@/modules/auth/infrastructure/accountsDatabase';
+import type { AccountsDatabase } from '@/modules/auth/infrastructure/accountsDatabase';
 import {
   DEFAULT_ITERATIONS,
   deriveWrappingKey,
@@ -26,11 +25,17 @@ import { fromBase64, toBase64 } from '@/shared/crypto/aesGcm';
  * and once by a key derived from a recovery code. Either secret unlocks
  * the same key, so resetting a forgotten password keeps every design.
  * Keys handed to the app are non-extractable.
+ *
+ * The wrapped key lives in a `WrappedKeyStore` (this device, or the server
+ * for Supabase accounts). Updates are version-checked, so two devices
+ * changing the password at once can't silently undo each other: the
+ * second one fails with `stale` and nothing is stored.
  */
 export function createKeyring(options: {
-  db: AccountsDatabase;
+  store: WrappedKeyStore;
   iterations?: number;
 }): Keyring {
+  const { store } = options;
   const iterations = options.iterations ?? DEFAULT_ITERATIONS;
   const dataKeyAlgorithm = { name: 'AES-GCM', length: 256 } as const;
   const usages: KeyUsage[] = ['encrypt', 'decrypt'];
@@ -53,6 +58,9 @@ export function createKeyring(options: {
       wrapped: toBase64(new Uint8Array(wrapped)),
     };
   };
+
+  const wrapRecovery = (code: string, dataKey: CryptoKey) =>
+    wrapWith(normaliseRecoveryCode(code) ?? '', dataKey);
 
   /** Extractable only so it can be re-wrapped; never leaves this module. */
   const unwrapWith = async (
@@ -96,47 +104,69 @@ export function createKeyring(options: {
     }
   };
 
-  const existing = (userId: string) => options.db.keys.get(userId);
+  const save = async (
+    current: WrappedKeyRecord,
+    next: Partial<Pick<WrappedKeyRecord, 'password' | 'recovery'>>,
+  ) => {
+    const stored = await store.update(
+      {
+        userId: current.userId,
+        password: next.password ?? current.password,
+        recovery:
+          next.recovery === undefined ? current.recovery : next.recovery,
+      },
+      current.version,
+    );
+    if (!stored) {
+      throw new AuthError('stale');
+    }
+  };
+
+  const unlockExisting = async (record: WrappedKeyRecord, password: string) => {
+    const dataKey = await unwrapWith(
+      record.password,
+      password,
+      'invalid-credentials',
+    );
+    if (record.recovery) {
+      return { dataKey: await nonExtractable(dataKey), recoveryCode: null };
+    }
+    // Accounts created before recovery codes existed get one now.
+    const recoveryCode = generateRecoveryCode();
+    await save(record, { recovery: await wrapRecovery(recoveryCode, dataKey) });
+    return { dataKey: await nonExtractable(dataKey), recoveryCode };
+  };
 
   return {
     unlock: async (userId, password) => {
-      const record = await existing(userId);
-      if (!record) {
-        const dataKey = await crypto.subtle.generateKey(
-          dataKeyAlgorithm,
-          true,
-          usages,
-        );
-        const recoveryCode = generateRecoveryCode();
-        const row: WrappedKeyRow = {
-          userId,
-          ...(await wrapWith(password, dataKey)),
-          recovery: await wrapWith(
-            normaliseRecoveryCode(recoveryCode) ?? '',
-            dataKey,
-          ),
-        };
-        await options.db.keys.put(row);
-        return { dataKey: await nonExtractable(dataKey), recoveryCode };
+      const record = await store.get(userId);
+      if (record) {
+        return unlockExisting(record, password);
       }
-      const dataKey = await unwrapWith(record, password, 'invalid-credentials');
-      if (record.recovery) {
-        return { dataKey: await nonExtractable(dataKey), recoveryCode: null };
-      }
-      // Accounts created before recovery codes existed get one now.
+      const dataKey = await crypto.subtle.generateKey(
+        dataKeyAlgorithm,
+        true,
+        usages,
+      );
       const recoveryCode = generateRecoveryCode();
-      await options.db.keys.put({
-        ...record,
-        recovery: await wrapWith(
-          normaliseRecoveryCode(recoveryCode) ?? '',
-          dataKey,
-        ),
+      const created = await store.create({
+        userId,
+        password: await wrapWith(password, dataKey),
+        recovery: await wrapRecovery(recoveryCode, dataKey),
       });
+      if (!created) {
+        // Another device created the key first: use that one.
+        const winner = await store.get(userId);
+        if (!winner) {
+          throw new AuthError('stale');
+        }
+        return unlockExisting(winner, password);
+      }
       return { dataKey: await nonExtractable(dataKey), recoveryCode };
     },
 
     recover: async (userId, recoveryCode, newPassword, beforeCommit) => {
-      const record = await existing(userId);
+      const record = await store.get(userId);
       const code = normaliseRecoveryCode(recoveryCode);
       if (!record?.recovery || !code) {
         throw new AuthError('invalid-recovery');
@@ -146,9 +176,9 @@ export function createKeyring(options: {
         code,
         'invalid-recovery',
       );
-      const rewrapped = await wrapWith(newPassword, dataKey);
+      const password = await wrapWith(newPassword, dataKey);
       await beforeCommit?.();
-      await options.db.keys.put({ ...record, ...rewrapped });
+      await save(record, { password });
       return nonExtractable(dataKey);
     },
 
@@ -158,37 +188,39 @@ export function createKeyring(options: {
       newPassword,
       beforeCommit,
     ) => {
-      const record = await existing(userId);
+      const record = await store.get(userId);
       if (!record) {
         throw new AuthError('invalid-credentials');
       }
       const dataKey = await unwrapWith(
-        record,
+        record.password,
         currentPassword,
         'invalid-credentials',
       );
-      const rewrapped = await wrapWith(newPassword, dataKey);
+      const password = await wrapWith(newPassword, dataKey);
       await beforeCommit?.();
-      await options.db.keys.put({ ...record, ...rewrapped });
+      await save(record, { password });
     },
 
     issueRecoveryCode: async (userId, password) => {
-      const record = await existing(userId);
+      const record = await store.get(userId);
       if (!record) {
         throw new AuthError('invalid-credentials');
       }
-      const dataKey = await unwrapWith(record, password, 'invalid-credentials');
+      const dataKey = await unwrapWith(
+        record.password,
+        password,
+        'invalid-credentials',
+      );
       const recoveryCode = generateRecoveryCode();
       // Replacing the wrap makes any earlier code useless.
-      await options.db.keys.put({
-        ...record,
-        recovery: await wrapWith(
-          normaliseRecoveryCode(recoveryCode) ?? '',
-          dataKey,
-        ),
+      await save(record, {
+        recovery: await wrapRecovery(recoveryCode, dataKey),
       });
       return recoveryCode;
     },
+
+    forget: (userId) => store.forget(userId),
   };
 }
 

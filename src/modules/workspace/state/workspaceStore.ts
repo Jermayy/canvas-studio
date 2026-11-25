@@ -37,6 +37,8 @@ export interface WorkspaceState {
   saves: Readonly<Record<string, SaveState>>;
   /** False in the sandbox: nothing outlives the tab. */
   persistent: boolean;
+  /** Bumped each time a design is replaced by a copy from another device. */
+  remoteRevisions: Readonly<Record<string, number>>;
 }
 
 export interface WorkspaceActions {
@@ -53,6 +55,14 @@ export interface WorkspaceActions {
   addImage: (file: File) => Promise<AssetMeta>;
   removeAsset: (id: string) => Promise<void>;
   getAssetBlob: (id: string) => Promise<Blob | null>;
+  /** True while an edit is still waiting to be stored. */
+  hasUnsavedChanges: (id: string) => boolean;
+  /** Sync: store a design from another device (no echo back to sync). */
+  applyRemoteDocument: (document: DesignDocument) => Promise<void>;
+  /** Sync: drop a design deleted on another device. */
+  removeRemoteDocument: (id: string) => Promise<void>;
+  /** Sync: store an image downloaded from the cloud. */
+  applyRemoteAsset: (meta: AssetMeta, blob: Blob) => Promise<void>;
   dispose: () => void;
 }
 
@@ -68,6 +78,10 @@ export interface WorkspaceDependencies {
   readImageSize: (blob: Blob) => Promise<{ width: number; height: number }>;
   /** Called after a document is safely stored (feeds cloud sync). */
   onPersisted?: (document: DesignDocument) => void;
+  /** Called after a document is deleted from storage. */
+  onRemoved?: (id: string) => void;
+  onAssetAdded?: (id: string) => void;
+  onAssetRemoved?: (id: string) => void;
   saveDelayMs?: number;
 }
 
@@ -165,6 +179,7 @@ export function createWorkspaceStore(
       assets: [],
       saves: {},
       persistent: deps.persistent,
+      remoteRevisions: {},
 
       load: async () => {
         set({ status: 'loading', loadError: null });
@@ -238,6 +253,7 @@ export function createWorkspaceStore(
         }));
         try {
           await deps.documents.remove(id);
+          deps.onRemoved?.(id);
           return document;
         } catch (error) {
           deps.logger.error('workspace.delete_failed', {
@@ -296,6 +312,7 @@ export function createWorkspaceStore(
         };
         await deps.assets.put(meta, new Blob([file], { type: check.mimeType }));
         set((state) => ({ assets: [meta, ...state.assets] }));
+        deps.onAssetAdded?.(meta.id);
         return meta;
       },
 
@@ -304,9 +321,60 @@ export function createWorkspaceStore(
         set((state) => ({
           assets: state.assets.filter((asset) => asset.id !== id),
         }));
+        deps.onAssetRemoved?.(id);
       },
 
       getAssetBlob: (id) => deps.assets.get(id),
+
+      hasUnsavedChanges: (id) => {
+        const status = get().saves[id]?.status;
+        return timers.has(id) || (status !== undefined && status !== 'saved');
+      },
+
+      applyRemoteDocument: async (document) => {
+        await deps.documents.put(document);
+        set((state) => ({
+          documents: { ...state.documents, [document.id]: document },
+          saves: {
+            ...state.saves,
+            [document.id]: {
+              status: 'saved',
+              savedAt: deps.now(),
+              error: null,
+            },
+          },
+          remoteRevisions: {
+            ...state.remoteRevisions,
+            [document.id]: (state.remoteRevisions[document.id] ?? 0) + 1,
+          },
+        }));
+      },
+
+      removeRemoteDocument: async (id) => {
+        const timer = timers.get(id);
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timers.delete(id);
+        }
+        await deps.documents.remove(id);
+        set((state) => ({
+          documents: omit(state.documents, id),
+          saves: omit(state.saves, id),
+          remoteRevisions: {
+            ...state.remoteRevisions,
+            [id]: (state.remoteRevisions[id] ?? 0) + 1,
+          },
+        }));
+      },
+
+      applyRemoteAsset: async (meta, blob) => {
+        await deps.assets.put(meta, blob);
+        set((state) =>
+          state.assets.some((asset) => asset.id === meta.id)
+            ? state
+            : { assets: [meta, ...state.assets] },
+        );
+      },
 
       dispose: () => {
         for (const timer of timers.values()) {

@@ -185,6 +185,99 @@ function NewRecoveryCode() {
   );
 }
 
+function DeleteAccount() {
+  const { cloudSync } = useServices();
+  const { session, deleteAccount } = useSession();
+  const [confirming, setConfirming] = useState(false);
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (busy || password.length === 0) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await deleteAccount(password);
+    // On success (or a half-finished delete) the app signs out and leaves.
+    if (!result.ok && !result.workspaceClosed) {
+      setBusy(false);
+      setError(result.message);
+    }
+  };
+
+  return (
+    <form
+      className="settings-section settings-section--danger"
+      noValidate
+      aria-labelledby="delete-account-title"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <h3 id="delete-account-title" className="settings-section__title">
+        Delete account
+      </h3>
+      <p className="inspector-hint">
+        Permanently deletes <strong>{session?.email}</strong> and everything in
+        it: all designs and uploaded images
+        {cloudSync ? ' in the cloud and on this device' : ' on this device'},
+        {cloudSync ? ' every share link,' : ''} and your sign-in. This can’t be
+        undone. Want to keep a design? Export it first.
+      </p>
+      {!confirming ? (
+        <Button
+          variant="danger"
+          icon="trash"
+          onClick={() => {
+            setConfirming(true);
+          }}
+        >
+          Delete my account…
+        </Button>
+      ) : (
+        <>
+          {error && <Banner tone="error">{error}</Banner>}
+          <TextField
+            label="Enter your password to confirm"
+            type="password"
+            autoComplete="current-password"
+            // Revealed only after an explicit click: focus where they'll type.
+            autoFocus
+            value={password}
+            onChange={(event) => {
+              setPassword(event.target.value);
+            }}
+          />
+          <div className="settings-section__actions">
+            <Button
+              disabled={busy}
+              onClick={() => {
+                setConfirming(false);
+                setPassword('');
+                setError(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="danger"
+              disabled={password.length === 0}
+              busy={busy}
+              busyLabel="Deleting everything…"
+            >
+              Delete permanently
+            </Button>
+          </div>
+        </>
+      )}
+    </form>
+  );
+}
+
 export function SecurityDialog({
   open,
   onClose,
@@ -197,7 +290,7 @@ export function SecurityDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="Password & recovery"
+      title="Account & security"
       description="Your designs stay encrypted; changing the password re-wraps the key, nothing is lost."
     >
       <ChangePassword
@@ -207,6 +300,7 @@ export function SecurityDialog({
         }}
       />
       <NewRecoveryCode />
+      <DeleteAccount />
     </Dialog>
   );
 }

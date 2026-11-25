@@ -14,7 +14,10 @@ function describe(
       return {
         icon: 'refresh',
         label: 'Syncing',
-        detail: `Uploading ${state.pending} change${state.pending === 1 ? '' : 's'} (simulated cloud)`,
+        detail:
+          state.pending > 0
+            ? `Uploading ${state.pending} encrypted change${state.pending === 1 ? '' : 's'}`
+            : 'Checking for changes from your other devices',
       };
     case 'offline':
       return {
@@ -26,15 +29,17 @@ function describe(
       return {
         icon: 'cloud-off',
         label: 'Sync paused',
-        detail: `${state.lastError ?? 'Sync failed'}. Retrying automatically; your work is saved on this device.`,
+        detail: `${state.lastError ?? 'Sync failed'}. Retrying automatically; your work is saved on this device. Click to retry now.`,
       };
     case 'synced':
       return {
         icon: 'cloud',
         label: 'Synced',
-        detail: state.lastSyncedAt
-          ? `All changes synced ${formatRelative(new Date(state.lastSyncedAt).toISOString(), now)} (simulated cloud)`
-          : 'Up to date (simulated cloud)',
+        detail: `${
+          state.lastSyncedAt
+            ? `All changes synced ${formatRelative(new Date(state.lastSyncedAt).toISOString(), now)}, encrypted`
+            : 'Up to date'
+        }. ${state.live ? 'Edits from your other devices appear live.' : 'Checking your other devices every 30 seconds.'}`,
       };
   }
 }

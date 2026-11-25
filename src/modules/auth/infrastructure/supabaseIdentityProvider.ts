@@ -51,9 +51,16 @@ export interface SupabaseAuthClient {
       error: SupabaseError | null;
     }>;
   };
+  rpc: (fn: 'delete_my_account') => PromiseLike<{
+    error: SupabaseError | null;
+  }>;
 }
 
 function toAuthError(error: SupabaseError): AuthError {
+  // Checked first: it's also a 429, but hourly and project-wide.
+  if (error.code === 'over_email_send_rate_limit') {
+    return new AuthError('email-limited');
+  }
   if (error.status === 429 || error.code === 'over_request_rate_limit') {
     return new AuthError('rate-limited');
   }
@@ -158,6 +165,17 @@ export function createSupabaseIdentityProvider(
       if (error) {
         throw toAuthError(error);
       }
+    },
+
+    deleteAccount: async () => {
+      // Server-side: refuses while files remain, then deletes the auth user
+      // (keys, designs and shares cascade). RLS scopes it to the caller.
+      const { error } = await client.rpc('delete_my_account');
+      if (error) {
+        throw toAuthError(error);
+      }
+      // The session belongs to a deleted user; drop it locally.
+      await client.auth.signOut();
     },
 
     exchangeResetCode: async (code) => {

@@ -9,6 +9,7 @@ import {
   type AppServices,
   type Workspace,
 } from '@/app/services';
+import type { DeleteAccountResult } from '@/modules/account/deleteAccount';
 import type { AuthSuccess } from '@/modules/auth/application/authService';
 import type { StoredSession } from '@/modules/auth/application/ports';
 import { RecoveryCodeDialog } from '@/modules/auth/components/RecoveryCode';
@@ -25,6 +26,7 @@ import { useStore } from 'zustand';
 const DashboardPage = lazy(() => import('@/modules/dashboard/DashboardPage'));
 const StudioRoute = lazy(() => import('@/modules/studio/StudioRoute'));
 const SandboxRoute = lazy(() => import('@/modules/studio/SandboxRoute'));
+const SharedDesignPage = lazy(() => import('@/modules/share/SharedDesignPage'));
 
 type AuthState =
   | { status: 'restoring' }
@@ -86,14 +88,25 @@ function routeNeedsAccount(
   return route.name === 'projects' || route.name === 'studio';
 }
 
+/** Runs `onEnd` once on mount (ending a session before a reset link). */
+function EndSessionForReset({ onEnd }: { onEnd: () => Promise<void> }) {
+  const end = useEffectEvent(onEnd);
+  useEffect(() => {
+    void end();
+  }, []);
+  return <FullScreenLoader label="Opening your reset link…" />;
+}
+
 function Routes({
   route,
   auth,
   onAuthenticated,
+  onResetLinkWhileSignedIn,
 }: {
   route: Route;
   auth: AuthState;
   onAuthenticated: (success: AuthSuccess, next: string) => void;
+  onResetLinkWhileSignedIn: () => Promise<void>;
 }) {
   const location = useLocation();
   switch (route.name) {
@@ -106,6 +119,9 @@ function Routes({
       }
       return (
         <AuthPage
+          // Keyed by mode: switching sign-up ↔ sign-in starts a fresh form
+          // (otherwise "Check your inbox" outlives the link to sign in).
+          key={route.name}
           mode={route.name}
           next={route.next}
           onAuthenticated={(success) => {
@@ -114,6 +130,11 @@ function Routes({
         />
       );
     case 'reset-password':
+      // A reset link (with a code) wins over the current session: whoever
+      // opened it proved access to the account's email.
+      if (auth.status === 'signed-in' && route.code) {
+        return <EndSessionForReset onEnd={onResetLinkWhileSignedIn} />;
+      }
       if (auth.status === 'signed-in') {
         return <Redirect to="/projects" />;
       }
@@ -128,6 +149,8 @@ function Routes({
       );
     case 'sandbox':
       return <SandboxRoute />;
+    case 'shared':
+      return <SharedDesignPage token={route.token} />;
     case 'not-found':
       return <NotFoundPage />;
     case 'projects':
@@ -209,6 +232,41 @@ export function App({ services }: { services: AppServices }) {
       );
   };
 
+  const deleteAccount = async (
+    password: string,
+  ): Promise<DeleteAccountResult> => {
+    if (auth.status !== 'signed-in') {
+      return {
+        ok: false,
+        message: 'You’re not signed in.',
+        workspaceClosed: false,
+      };
+    }
+    const result = await services.deleteAccount({
+      session: auth.stored.session,
+      password,
+      workspace: auth.workspace,
+    });
+    if (!result.ok && !result.workspaceClosed) {
+      return result;
+    }
+    if (!result.ok) {
+      // Half-finished: the workspace is closed, so sign out and say why.
+      await services.auth.signOut();
+    }
+    setAuth({ status: 'signed-out' });
+    navigate('/', { replace: true });
+    services.toasts
+      .getState()
+      .notify(
+        result.ok
+          ? 'Your account and all its designs were deleted.'
+          : result.message,
+        { tone: result.ok ? 'success' : 'warning', durationMs: 10_000 },
+      );
+    return result;
+  };
+
   // Sessions end on time even if the tab stays open.
   const expiresAt =
     auth.status === 'signed-in' ? auth.stored.session.expiresAt : null;
@@ -235,6 +293,7 @@ export function App({ services }: { services: AppServices }) {
         value={{
           session: auth.status === 'signed-in' ? auth.stored.session : null,
           signOut: () => signOut(),
+          deleteAccount,
         }}
       >
         <ErrorBoundary logger={services.logger}>
@@ -246,6 +305,14 @@ export function App({ services }: { services: AppServices }) {
                 open(success.stored);
                 setRecoveryCode(success.recoveryCode);
                 navigate(next, { replace: true });
+              }}
+              onResetLinkWhileSignedIn={async () => {
+                if (auth.status !== 'signed-in') {
+                  return;
+                }
+                await auth.workspace.close();
+                await services.auth.endLocalSession();
+                setAuth({ status: 'signed-out' });
               }}
             />
           </Suspense>

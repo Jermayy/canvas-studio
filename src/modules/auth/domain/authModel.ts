@@ -25,7 +25,9 @@ export type AuthErrorCode =
   | 'weak-password'
   | 'locked'
   | 'rate-limited'
+  | 'email-limited'
   | 'network'
+  | 'stale'
   | 'unknown';
 
 const MESSAGES: Record<AuthErrorCode, string> = {
@@ -40,7 +42,12 @@ const MESSAGES: Record<AuthErrorCode, string> = {
   'weak-password': 'Choose a stronger password.',
   locked: 'Too many attempts. Try again shortly.',
   'rate-limited': 'Too many attempts. Wait a minute and try again.',
+  // The project's hourly email quota (sign-up confirmations, resets).
+  'email-limited':
+    'We can’t send more emails right now. Try again in an hour, or sign in if you already have an account.',
   network: 'Can’t reach the sign-in service. Check your connection.',
+  stale:
+    'Your account was just updated on another device. Nothing changed here; try again.',
   unknown: 'Something went wrong signing you in. Try again.',
 };
 

@@ -2,6 +2,7 @@ import { createAuthService } from '@/modules/auth/application/authService';
 import type {
   IdentityProvider,
   Keyring,
+  WrappedKeyRecord,
 } from '@/modules/auth/application/ports';
 import {
   AuthError,
@@ -32,12 +33,18 @@ import {
 import { createLocalIdentityProvider } from '@/modules/auth/infrastructure/localIdentityProvider';
 import { constantTimeEqual } from '@/modules/auth/infrastructure/passwordKdf';
 import {
+  createLocalWrappedKeyStore,
+  createSupabaseWrappedKeyStore,
+  withLocalFallback,
+} from '@/modules/auth/infrastructure/wrappedKeyStores';
+import {
   createSupabaseIdentityProvider,
   type SupabaseAuthClient,
 } from '@/modules/auth/infrastructure/supabaseIdentityProvider';
 import { createAesGcmCipher, sealJson, openJson } from '@/shared/crypto/aesGcm';
 import { createMemoryKeyValueStore } from '@/shared/lib/keyValueStore';
 import { createLogger } from '@/shared/logger';
+import { createFakeSupabase } from '@/test/fakeSupabase';
 import { NOW } from '@/test/factories';
 
 const ITERATIONS = 1000;
@@ -134,7 +141,10 @@ describe('local identity provider + keyring', () => {
     return {
       db,
       identity,
-      keyring: createKeyring({ db, iterations: ITERATIONS }),
+      keyring: createKeyring({
+        store: createLocalWrappedKeyStore(db),
+        iterations: ITERATIONS,
+      }),
     };
   }
 
@@ -260,6 +270,7 @@ describe('auth service', () => {
     exchangeResetCode: vi.fn(() =>
       Promise.resolve({ userId: 'u1', email: 'a@x.test', displayName: 'Ann' }),
     ),
+    deleteAccount: vi.fn(() => Promise.resolve()),
     ...overrides,
   });
 
@@ -291,6 +302,7 @@ describe('auth service', () => {
       issueRecoveryCode: vi.fn(() =>
         Promise.resolve('NEW0-CODE-0000-0000-0000'),
       ),
+      forget: vi.fn(() => Promise.resolve()),
     };
     const vault = createMemorySessionVault();
     const service = createAuthService({
@@ -652,6 +664,61 @@ describe('auth service', () => {
     vault.load = () => Promise.reject(new Error('corrupt'));
     expect(await service.restore()).toBeNull();
   });
+
+  it('verifies a password for account deletion, throttling failures', async () => {
+    const { service, identity } = await setup();
+    await expect(
+      service.verifyPassword({ session, password: PASSWORD }),
+    ).resolves.toBeUndefined();
+    vi.mocked(identity.signIn).mockRejectedValue(
+      new AuthError('invalid-credentials'),
+    );
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(
+        service.verifyPassword({ session, password: 'nope' }),
+      ).rejects.toMatchObject({ code: 'invalid-credentials' });
+    }
+    await expect(
+      service.verifyPassword({ session, password: 'nope' }),
+    ).rejects.toMatchObject({ code: 'locked' });
+  });
+
+  it('rejects a password that belongs to a different account', async () => {
+    const { service, identity } = await setup();
+    vi.mocked(identity.signIn).mockResolvedValueOnce({
+      userId: 'someone-else',
+      email: 'a@x.test',
+      displayName: 'Ann',
+    });
+    await expect(
+      service.verifyPassword({ session, password: PASSWORD }),
+    ).rejects.toMatchObject({ code: 'invalid-credentials' });
+  });
+
+  it('ends only its own session for a reset link, leaving the provider alone', async () => {
+    const { service, identity, vault } = await setup();
+    await service.signIn({
+      email: 'a@x.test',
+      password: PASSWORD,
+      remember: false,
+    });
+    await service.endLocalSession();
+    expect(await vault.load()).toBeNull();
+    expect(identity.signOut).not.toHaveBeenCalled();
+  });
+
+  it('deletes the identity, the wrapped key and the stored session', async () => {
+    const { service, identity, keyring, vault } = await setup();
+    await service.signIn({
+      email: 'a@x.test',
+      password: PASSWORD,
+      remember: false,
+    });
+    await service.deleteIdentity(session);
+    expect(identity.deleteAccount).toHaveBeenCalledWith('u1');
+    expect(keyring.forget).toHaveBeenCalledWith('u1');
+    expect(await vault.load()).toBeNull();
+  });
 });
 
 describe('Supabase identity provider', () => {
@@ -663,8 +730,12 @@ describe('Supabase identity provider', () => {
 
   function client(
     overrides: Partial<SupabaseAuthClient['auth']> = {},
+    rpc: SupabaseAuthClient['rpc'] = vi.fn(() =>
+      Promise.resolve({ error: null }),
+    ),
   ): SupabaseAuthClient {
     return {
+      rpc,
       auth: {
         signInWithPassword: vi.fn(() =>
           Promise.resolve({ data: { user, session: {} }, error: null }),
@@ -687,6 +758,30 @@ describe('Supabase identity provider', () => {
       },
     };
   }
+
+  it('deletes the account server-side, then drops the session', async () => {
+    const rpc = vi.fn(() => Promise.resolve({ error: null }));
+    const signOut = vi.fn(() => Promise.resolve({ error: null }));
+    const provider = createSupabaseIdentityProvider(
+      client({ signOut }, rpc),
+      'https://app/sign-in',
+    );
+    await provider.deleteAccount('sb-1');
+    expect(rpc).toHaveBeenCalledWith('delete_my_account');
+    expect(signOut).toHaveBeenCalled();
+
+    const refusing = createSupabaseIdentityProvider(
+      client({}, () =>
+        Promise.resolve({
+          error: { status: 400, message: 'storage_not_empty' },
+        }),
+      ),
+      'https://app/sign-in',
+    );
+    await expect(refusing.deleteAccount('sb-1')).rejects.toBeInstanceOf(
+      AuthError,
+    );
+  });
 
   it('maps a successful sign-in and the current session', async () => {
     const provider = createSupabaseIdentityProvider(
@@ -719,6 +814,13 @@ describe('Supabase identity provider', () => {
     });
     await expect(failing(429).signIn('a', 'b')).rejects.toMatchObject({
       code: 'rate-limited',
+    });
+    // The hourly email quota gets its own message, not "wait a minute".
+    await expect(
+      failing(429, 'over_email_send_rate_limit').signIn('a', 'b'),
+    ).rejects.toMatchObject({
+      code: 'email-limited',
+      message: expect.stringContaining('Try again in an hour'),
     });
     await expect(
       failing(422, 'weak_password').signIn('a', 'b'),
@@ -877,7 +979,13 @@ describe('keyring recovery', () => {
 
   function setup() {
     const db = freshAccounts();
-    return { db, keyring: createKeyring({ db, iterations: ITERATIONS }) };
+    return {
+      db,
+      keyring: createKeyring({
+        store: createLocalWrappedKeyStore(db),
+        iterations: ITERATIONS,
+      }),
+    };
   }
 
   async function sealedWith(key: CryptoKey) {
@@ -982,6 +1090,167 @@ describe('keyring recovery', () => {
   });
 });
 
+describe('keyring concurrency and key stores', () => {
+  const NEW_PASSWORD = 'Brand-new-pass-77';
+
+  it('fails a stale update with nothing stored, so the other device’s change stands', async () => {
+    const store = createLocalWrappedKeyStore(freshAccounts());
+    const deviceA = createKeyring({ store, iterations: ITERATIONS });
+    await deviceA.unlock('u', PASSWORD);
+    // Device B read the key, then A changed the password first.
+    const staleRead = await store.get('u');
+    await deviceA.changePassword('u', PASSWORD, NEW_PASSWORD);
+    const racing = {
+      ...store,
+      get: () => Promise.resolve(staleRead),
+    };
+    const deviceB = createKeyring({ store: racing, iterations: ITERATIONS });
+    await expect(
+      deviceB.changePassword('u', PASSWORD, 'Third-pass-123'),
+    ).rejects.toMatchObject({ code: 'stale' });
+    await expect(deviceA.unlock('u', NEW_PASSWORD)).resolves.toBeDefined();
+  });
+
+  it('adopts the key another device created first instead of making a second', async () => {
+    const store = createLocalWrappedKeyStore(freshAccounts());
+    const first = createKeyring({ store, iterations: ITERATIONS });
+    const created = await first.unlock('u', PASSWORD);
+    const sealed = await sealJson(createAesGcmCipher(created.dataKey), 'x');
+    // A device that saw no key yet tries to create one.
+    const racing = {
+      ...store,
+      get: vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockImplementation(() => store.get('u')),
+    };
+    const second = createKeyring({ store: racing, iterations: ITERATIONS });
+    const adopted = await second.unlock('u', PASSWORD);
+    expect(adopted.recoveryCode).toBeNull();
+    expect(await openJson(createAesGcmCipher(adopted.dataKey), sealed)).toBe(
+      'x',
+    );
+    // If the winner vanished, the loser fails safely.
+    const vanished = createKeyring({
+      store: { ...store, get: () => Promise.resolve(null) },
+      iterations: ITERATIONS,
+    });
+    await expect(vanished.unlock('u', PASSWORD)).rejects.toMatchObject({
+      code: 'stale',
+    });
+  });
+
+  it('forgets a local key on account deletion', async () => {
+    const store = createLocalWrappedKeyStore(freshAccounts());
+    const keyring = createKeyring({ store, iterations: ITERATIONS });
+    await keyring.unlock('u', PASSWORD);
+    await keyring.forget('u');
+    expect(await store.get('u')).toBeNull();
+    expect(
+      await store.update(
+        {
+          userId: 'u',
+          password: { salt: 'a', iterations: 1000, iv: 'a', wrapped: 'a' },
+          recovery: null,
+        },
+        1,
+      ),
+    ).toBe(false);
+  });
+
+  const WRAP = {
+    salt: 'c2FsdA==',
+    iterations: 600000,
+    iv: 'aXY=',
+    wrapped: 'd3JhcHBlZA==',
+  };
+  const ROW = {
+    user_id: 'u',
+    password_wrap: WRAP,
+    recovery_wrap: null,
+    version: 3,
+  };
+
+  it('stores wrapped keys on Supabase with version-checked updates', async () => {
+    const fake = createFakeSupabase();
+    const store = createSupabaseWrappedKeyStore(fake.client);
+    fake.respond(
+      { data: ROW },
+      { data: null },
+      { data: null },
+      { error: { message: 'dup', code: '23505' } },
+      { data: { version: 4 } },
+      { data: null },
+    );
+    expect(await store.get('u')).toEqual({
+      userId: 'u',
+      password: WRAP,
+      recovery: null,
+      version: 3,
+    });
+    expect(await store.get('ghost')).toBeNull();
+    const record = { userId: 'u', password: WRAP, recovery: WRAP };
+    expect(await store.create(record)).toBe(true);
+    expect(await store.create(record)).toBe(false);
+    expect(await store.update(record, 3)).toBe(true);
+    expect(await store.update(record, 3)).toBe(false);
+    expect(fake.calls[0]?.table).toBe('workspace_keys');
+    const update = fake.calls[4]?.chain;
+    expect(
+      update?.filter(([name]) => name === 'eq').map(([, args]) => args),
+    ).toEqual([
+      ['user_id', 'u'],
+      ['version', 3],
+    ]);
+    await expect(store.forget('u')).resolves.toBeUndefined();
+  });
+
+  it('rejects malformed server rows and surfaces errors', async () => {
+    const fake = createFakeSupabase();
+    const store = createSupabaseWrappedKeyStore(fake.client);
+    const record = { userId: 'u', password: WRAP, recovery: null };
+    fake.respond(
+      { data: { ...ROW, password_wrap: { ...WRAP, iterations: 1 } } },
+      { error: { message: 'down' } },
+      { error: { message: 'down' } },
+      { error: { message: 'down' } },
+    );
+    await expect(store.get('u')).rejects.toThrow();
+    await expect(store.get('u')).rejects.toThrow('load key failed');
+    await expect(store.create(record)).rejects.toThrow('store key failed');
+    await expect(store.update(record, 1)).rejects.toThrow('update key failed');
+  });
+
+  it('uploads a key that only this device has, then uses the server copy', async () => {
+    const local = createLocalWrappedKeyStore(freshAccounts());
+    const keyring = createKeyring({ store: local, iterations: ITERATIONS });
+    await keyring.unlock('u', PASSWORD);
+    const server = new Map<string, WrappedKeyRecord>();
+    const remote = {
+      get: (userId: string) => Promise.resolve(server.get(userId) ?? null),
+      create: (record: Omit<WrappedKeyRecord, 'version'>) => {
+        server.set(record.userId, { ...record, version: 1 });
+        return Promise.resolve(true);
+      },
+      update: () => Promise.resolve(false),
+      forget: vi.fn(() => Promise.resolve()),
+    };
+    const layered = withLocalFallback(remote, local, logger);
+    expect(await layered.get('u')).toMatchObject({ userId: 'u', version: 1 });
+    expect(server.has('u')).toBe(true);
+    expect(await layered.get('ghost')).toBeNull();
+    expect(
+      await layered.update({ userId: 'u', password: WRAP, recovery: null }, 1),
+    ).toBe(false);
+    await layered.forget('u');
+    expect(remote.forget).toHaveBeenCalled();
+    expect(await local.get('u')).toBeNull();
+    // The upgraded key still unlocks with the same password.
+    const upgraded = createKeyring({ store: layered, iterations: ITERATIONS });
+    await expect(upgraded.unlock('u', PASSWORD)).resolves.toBeDefined();
+  });
+});
+
 describe('local identity provider password updates', () => {
   it('finds accounts by email and replaces the verifier', async () => {
     const db = freshAccounts();
@@ -1018,5 +1287,7 @@ describe('local identity provider password updates', () => {
     await expect(identity.exchangeResetCode('code')).rejects.toMatchObject({
       code: 'reset-link-invalid',
     });
+    await identity.deleteAccount('u');
+    expect(await identity.findAccount('a@x.test')).toBeNull();
   });
 });

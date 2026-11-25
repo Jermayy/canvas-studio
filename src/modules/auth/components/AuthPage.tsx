@@ -164,12 +164,27 @@ export function AuthPage({
                 <strong>{confirmationSentTo}</strong>. Open it, then sign in
                 here.
               </p>
-              <Link
-                to={`/sign-in${nextQuery}`}
-                className="btn btn--primary btn--md"
-              >
-                Go to sign in
-              </Link>
+              {/* Shown for every sign-up, so it never reveals whether the
+                  email is registered (playbook 03; Supabase sends no new
+                  link to an existing account). */}
+              <p className="auth-card__confirm-hint">
+                Already have an account with this email? We don’t send another
+                link. Sign in instead, or reset your password.
+              </p>
+              <div className="auth-card__confirm-actions">
+                <Link
+                  to={`/sign-in${nextQuery}`}
+                  className="btn btn--primary btn--md"
+                >
+                  Go to sign in
+                </Link>
+                <Link
+                  to={`/reset-password?email=${encodeURIComponent(confirmationSentTo)}`}
+                  className="auth-form__forgot"
+                >
+                  Forgot password?
+                </Link>
+              </div>
             </div>
           ) : (
             <>

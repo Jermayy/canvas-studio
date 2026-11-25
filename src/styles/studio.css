@@ -1001,3 +1001,15 @@
     display: none;
   }
 }
+
+/* Shown when another device changes the open design (cloud sync). */
+.studio-remote-notice {
+  position: fixed;
+  z-index: 40;
+  top: 4rem;
+  left: 50%;
+  width: min(36rem, calc(100vw - 2rem));
+  transform: translateX(-50%);
+  box-shadow: var(--shadow-lg);
+  border-radius: var(--radius-lg);
+}

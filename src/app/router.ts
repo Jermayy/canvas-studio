@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
 /**
- * A tiny History-API router: four screens don't justify a routing library.
+ * A tiny History-API router: a handful of screens don't justify a routing library.
  * Paths and query strings are the source of truth for navigation state.
  */
 
@@ -13,6 +13,7 @@ export type Route =
   | { name: 'projects'; search: string }
   | { name: 'studio'; documentId: string }
   | { name: 'sandbox' }
+  | { name: 'shared'; token: string }
   | { name: 'not-found' };
 
 export const DEFAULT_AFTER_SIGN_IN = '/projects';
@@ -57,6 +58,11 @@ export function parseRoute(pathname: string, search: string): Route {
   }
   if (path === '/sandbox') {
     return { name: 'sandbox' };
+  }
+  const shared = /^\/s\/([^/]{1,64})$/.exec(path);
+  if (shared?.[1]) {
+    // Validated as a UUID by the page before anything is fetched.
+    return { name: 'shared', token: shared[1] };
   }
   const studio = /^\/studio\/([^/]+)$/.exec(path);
   if (studio?.[1] && DOCUMENT_ID.test(studio[1])) {

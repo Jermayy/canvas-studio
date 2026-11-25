@@ -1,3 +1,4 @@
+import StudioRoute from '@/modules/studio/StudioRoute';
 import { Studio } from '@/modules/studio/components/Studio';
 import type { DesignDocument } from '@/modules/document/domain/schema';
 import { NOW, pngFile, rect, text, withElements } from '@/test/factories';
@@ -502,5 +503,42 @@ describe('Studio', () => {
     await act(async () => {
       await Promise.resolve();
     });
+  });
+});
+
+describe('studio route', () => {
+  it('offers changes from another device instead of forcing them on the editor', async () => {
+    const document = withElements(rect({ id: 'card' }));
+    const { services } = createTestServices();
+    const workspace = services.openSandbox();
+    await workspace.store.getState().load();
+    await workspace.store.getState().createDocument(document);
+    renderWithWorkspace(<StudioRoute documentId={document.id} />, {
+      services,
+      workspace,
+    });
+    expect(await screen.findByLabelText('Design name')).toHaveValue(
+      document.name,
+    );
+
+    await act(() =>
+      workspace.store
+        .getState()
+        .applyRemoteDocument({ ...document, name: 'Edited elsewhere' }),
+    );
+    expect(screen.getByLabelText('Design name')).toHaveValue(document.name);
+    expect(screen.getByText(/changed on another device/)).toBeInTheDocument();
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: 'Load latest' }));
+    expect(screen.getByLabelText('Design name')).toHaveValue(
+      'Edited elsewhere',
+    );
+    expect(screen.queryByText(/changed on another device/)).toBeNull();
+
+    await act(() =>
+      workspace.store.getState().removeRemoteDocument(document.id),
+    );
+    expect(screen.getByText(/deleted on another device/)).toBeInTheDocument();
   });
 });

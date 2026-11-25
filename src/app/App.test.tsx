@@ -1,14 +1,15 @@
 import { App } from '@/app/App';
 import { navigate } from '@/app/router';
-import { createTestServices } from '@/test/testServices';
+import { createFakeCloud, createFakeShareStore } from '@/test/fakeCloud';
+import { createTestServices, type TestCloudOptions } from '@/test/testServices';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const PASSWORD = 'Plenty-long-pass-42';
 
-function start(path = '/') {
+function start(path = '/', cloud: TestCloudOptions = {}) {
   window.history.replaceState(null, '', path);
-  const { services, files } = createTestServices();
+  const { services, files } = createTestServices({}, cloud);
   render(<App services={services} />);
   return { services, files, user: userEvent.setup() };
 }
@@ -246,9 +247,9 @@ describe('App', () => {
     await signUp(user);
     await user.click(screen.getByRole('button', { name: /Account: Ann Lee/ }));
     await user.click(
-      screen.getByRole('menuitem', { name: 'Password & recovery' }),
+      screen.getByRole('menuitem', { name: 'Account & security' }),
     );
-    const dialog = screen.getByRole('dialog', { name: 'Password & recovery' });
+    const dialog = screen.getByRole('dialog', { name: 'Account & security' });
     await user.type(
       within(dialog).getByLabelText('Current password'),
       PASSWORD,
@@ -276,9 +277,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: /Account: Ann Lee/ }));
     await user.click(
-      screen.getByRole('menuitem', { name: 'Password & recovery' }),
+      screen.getByRole('menuitem', { name: 'Account & security' }),
     );
-    const again = screen.getByRole('dialog', { name: 'Password & recovery' });
+    const again = screen.getByRole('dialog', { name: 'Account & security' });
     await user.type(
       within(again).getByLabelText('Password'),
       'Wrong-password-1',
@@ -303,5 +304,204 @@ describe('App', () => {
     await user.click(
       within(again).getByRole('button', { name: 'Download as text' }),
     );
+  });
+
+  it('deletes the account and everything in it after confirming the password', async () => {
+    const { user, services } = start('/sign-up');
+    await screen.findByRole('heading', { name: 'Create your studio' });
+    await signUp(user);
+    await user.click(screen.getByRole('button', { name: /Festive Dinner/ }));
+    await screen.findByRole('application');
+    await user.click(screen.getByRole('link', { name: 'Back to projects' }));
+    await screen.findByText('1 design');
+
+    await user.click(screen.getByRole('button', { name: /Account: Ann Lee/ }));
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Account & security' }),
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Account & security' });
+    expect(
+      within(dialog).getByText(/This can’t be undone/),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Delete my account…' }),
+    );
+    const confirm = within(dialog).getByLabelText(
+      'Enter your password to confirm',
+    );
+    expect(confirm).toHaveFocus();
+    expect(
+      within(dialog).getByRole('button', { name: 'Delete permanently' }),
+    ).toBeDisabled();
+    await user.type(confirm, 'Wrong-password-1');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Delete permanently' }),
+    );
+    expect(
+      await within(dialog).findByText('Email or password is incorrect.'),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Delete my account…' }),
+    );
+    await user.type(
+      within(dialog).getByLabelText('Enter your password to confirm'),
+      PASSWORD,
+    );
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Delete permanently' }),
+    );
+
+    await screen.findByRole('heading', { name: /Event graphics/ });
+    expect(
+      services.toasts.getState().toasts.map((toast) => toast.message),
+    ).toContain('Your account and all its designs were deleted.');
+    navigate('/sign-in');
+    await user.type(await screen.findByLabelText('Email'), 'ann@example.test');
+    await user.type(screen.getByLabelText('Password'), PASSWORD);
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(
+      await screen.findByText('Email or password is incorrect.'),
+    ).toBeInTheDocument();
+  });
+
+  it('syncs designs and shares a view-only link that anyone can open', async () => {
+    const cloud = createFakeCloud();
+    const shares = createFakeShareStore();
+    const { user, files } = start('/sign-up', { cloud, shares });
+    await screen.findByRole('heading', { name: 'Create your studio' });
+    await signUp(user);
+    await user.click(screen.getByRole('button', { name: /Festive Dinner/ }));
+    await screen.findByRole('application');
+    await waitFor(() => {
+      expect(cloud.rows.size).toBe(1);
+    });
+    expect(JSON.stringify([...cloud.rows.values()])).not.toContain(
+      'Festive Dinner',
+    );
+    expect(
+      await screen.findByRole('button', { name: /^Synced/ }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    const dialog = screen.getByRole('dialog', { name: 'Share' });
+    await user.click(
+      await within(dialog).findByRole('button', { name: 'Create link' }),
+    );
+    const link = await within(dialog).findByLabelText('Share link');
+    const url = (link as HTMLInputElement).value;
+    expect(url).toMatch(/\/s\/5a000000-/);
+    expect(files.copyText).toHaveBeenCalledWith(url);
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Update image' }),
+    );
+    await within(dialog).findByRole('button', { name: 'Update image' });
+    expect(shares.shares.size).toBe(1);
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(new Blob(['png'])));
+    navigate(new URL(url).pathname);
+    expect(
+      await screen.findByRole('heading', { name: 'Festive Dinner' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', { name: 'Design: Festive Dinner' }),
+    ).toHaveAttribute('src', expect.stringContaining('cloud.example.test'));
+    await user.click(screen.getByRole('button', { name: 'Download PNG' }));
+    await waitFor(() => {
+      expect(files.downloads.at(-1)?.fileName).toBe('Festive Dinner.png');
+    });
+    fetchSpy.mockResolvedValueOnce(new Response('', { status: 500 }));
+    await user.click(screen.getByRole('button', { name: 'Download PNG' }));
+    expect(
+      await screen.findByText('Download failed. Please try again.'),
+    ).toBeInTheDocument();
+    fetchSpy.mockRestore();
+
+    navigate('/projects');
+    await user.click(
+      await screen.findByRole('link', { name: 'Festive Dinner' }),
+    );
+    await screen.findByRole('application');
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    const reopened = screen.getByRole('dialog', { name: 'Share' });
+    await user.click(
+      await within(reopened).findByRole('button', { name: 'Stop sharing' }),
+    );
+    await within(reopened).findByRole('button', { name: 'Create link' });
+    expect(shares.shares.size).toBe(0);
+  });
+
+  it('explains when a share link doesn’t exist', async () => {
+    start('/s/not-a-real-token');
+    expect(
+      await screen.findByRole('heading', { name: 'This link isn’t available' }),
+    ).toBeInTheDocument();
+  });
+
+  it('explains when a share link can’t be loaded', async () => {
+    const shares = createFakeShareStore();
+    shares.fetchShared = () => Promise.reject(new Error('offline'));
+    start('/s/5a000000-0000-4000-8000-000000000001', { shares });
+    expect(
+      await screen.findByRole('heading', { name: 'Couldn’t load this design' }),
+    ).toBeInTheDocument();
+  });
+
+  it('leaves the “check your inbox” screen when going to sign in', async () => {
+    window.history.replaceState(null, '', '/sign-up');
+    const { services } = createTestServices();
+    services.auth = {
+      ...services.auth,
+      signUp: () =>
+        Promise.resolve({ kind: 'confirm-email', email: 'ann@example.test' }),
+    };
+    render(<App services={services} />);
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText('Name'), 'Ann Lee');
+    await user.type(screen.getByLabelText('Email'), 'ann@example.test');
+    await user.type(screen.getByLabelText('Password'), PASSWORD);
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByRole('heading', { name: 'Check your inbox' });
+    // The same hint for every sign-up: it never says whether the email exists.
+    expect(
+      screen.getByText(/Already have an account with this email\?/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: 'Forgot password?' }),
+    ).toHaveAttribute('href', '/reset-password?email=ann%40example.test');
+
+    await user.click(screen.getByRole('link', { name: 'Go to sign in' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Welcome back' }),
+    ).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/sign-in');
+    expect(screen.queryByText('Check your inbox')).toBeNull();
+  });
+
+  it('opens the reset screen from a reset link even when already signed in', async () => {
+    const { user, services } = start('/sign-up');
+    await screen.findByRole('heading', { name: 'Create your studio' });
+    await signUp(user);
+    const endLocalSession = vi.spyOn(services.auth, 'endLocalSession');
+    const signOut = vi.spyOn(services.auth, 'signOut');
+
+    // Without a link, a signed-in user has nothing to reset here.
+    act(() => {
+      navigate('/reset-password');
+    });
+    await screen.findByRole('heading', { name: 'Projects' });
+
+    act(() => {
+      navigate('/reset-password?code=emailed-code');
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Reset your password' }),
+    ).toBeInTheDocument();
+    expect(window.location.search).toBe('?code=emailed-code');
+    expect(endLocalSession).toHaveBeenCalledTimes(1);
+    // A provider sign-out would delete the PKCE verifier the link needs.
+    expect(signOut).not.toHaveBeenCalled();
   });
 });

@@ -224,6 +224,64 @@ describe('workspace store', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(put).not.toHaveBeenCalled();
   });
+
+  it('applies changes from other devices without echoing them back', async () => {
+    const onPersisted = vi.fn();
+    const onRemoved = vi.fn();
+    const onAssetAdded = vi.fn();
+    const onAssetRemoved = vi.fn();
+    const { store, documents } = setup({
+      onPersisted,
+      onRemoved,
+      onAssetAdded,
+      onAssetRemoved,
+    });
+    await store.getState().load();
+    const remote = makeDocument({ id: 'r', name: 'From another device' });
+    await store.getState().applyRemoteDocument(remote);
+    expect(store.getState().documents.r).toEqual(remote);
+    expect(store.getState().remoteRevisions.r).toBe(1);
+    expect(store.getState().saves.r?.status).toBe('saved');
+    expect((await documents.list()).documents).toEqual([remote]);
+    expect(onPersisted).not.toHaveBeenCalled();
+
+    store.getState().saveDocument({ ...remote, name: 'Typing' });
+    expect(store.getState().hasUnsavedChanges('r')).toBe(true);
+    await store.getState().removeRemoteDocument('r');
+    expect(store.getState().documents.r).toBeUndefined();
+    expect(store.getState().remoteRevisions.r).toBe(2);
+    expect(store.getState().hasUnsavedChanges('r')).toBe(false);
+    await vi.runAllTimersAsync();
+    expect(onPersisted).not.toHaveBeenCalled();
+
+    const meta = {
+      id: 'img',
+      name: 'x.png',
+      mimeType: 'image/png',
+      width: 1,
+      height: 1,
+      size: 1,
+      createdAt: new Date(NOW).toISOString(),
+    };
+    await store.getState().applyRemoteAsset(meta, new Blob(['x']));
+    await store.getState().applyRemoteAsset(meta, new Blob(['x']));
+    expect(store.getState().assets).toEqual([meta]);
+    expect(onAssetAdded).not.toHaveBeenCalled();
+  });
+
+  it('tells sync about local deletions and image changes', async () => {
+    const onRemoved = vi.fn();
+    const onAssetAdded = vi.fn();
+    const onAssetRemoved = vi.fn();
+    const { store } = setup({ onRemoved, onAssetAdded, onAssetRemoved });
+    await store.getState().createDocument(makeDocument({ id: 'd' }));
+    await store.getState().removeDocument('d');
+    expect(onRemoved).toHaveBeenCalledWith('d');
+    const asset = await store.getState().addImage(pngFile());
+    expect(onAssetAdded).toHaveBeenCalledWith(asset.id);
+    await store.getState().removeAsset(asset.id);
+    expect(onAssetRemoved).toHaveBeenCalledWith(asset.id);
+  });
 });
 
 describe('image upload rules', () => {

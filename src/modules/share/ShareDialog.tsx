@@ -1,4 +1,4 @@
-import { useNotify, useServices } from '@/app/services';
+import { useNotify, useServices, useWorkspace } from '@/app/services';
 import type { DesignDocument } from '@/modules/document/domain/schema';
 import { ExportSettings } from '@/modules/export/ExportDialog';
 import {
@@ -9,6 +9,7 @@ import {
 } from '@/modules/export/domain/exportOptions';
 import { PHASE_LABELS, useExporter } from '@/modules/export/useExporter';
 import { buildMailto, parseRecipients } from '@/modules/share/emailDraft';
+import { ShareLinkCard } from '@/modules/share/ShareLinkCard';
 import { sanitizeFileName } from '@/shared/lib/fileName';
 import { Button } from '@/shared/ui/Button';
 import { Dialog } from '@/shared/ui/Dialog';
@@ -20,9 +21,9 @@ import { useId, useState } from 'react';
 type Action = 'native' | 'email' | 'copy';
 
 /**
- * Sharing without a backend: the device share sheet (files go straight to
- * Messages, Mail, Slack…), an email draft in the user's own mail app, or
- * the clipboard.
+ * Sharing: a view-only link (signed in with cloud sync), the device share
+ * sheet (files go straight to Messages, Mail, Slack…), an email draft in
+ * the user's own mail app, or the clipboard.
  */
 export function ShareDialog({
   open,
@@ -33,7 +34,9 @@ export function ShareDialog({
   onClose: () => void;
   document: DesignDocument;
 }) {
-  const { files } = useServices();
+  const { files, shares } = useServices();
+  const workspace = useWorkspace();
+  const linkShares = workspace.kind === 'account' ? shares : null;
   const notify = useNotify();
   const exporter = useExporter();
   const messageId = useId();
@@ -127,7 +130,11 @@ export function ShareDialog({
       open={open}
       onClose={onClose}
       title="Share"
-      description="Send your design as a file — nothing is uploaded to a server."
+      description={
+        linkShares
+          ? 'Share a view-only link, or send your design as a file.'
+          : 'Send your design as a file — nothing is uploaded to a server.'
+      }
       size="lg"
       footer={
         exporter.phase ? (
@@ -140,6 +147,9 @@ export function ShareDialog({
     >
       {error && <Banner tone="error">{error}</Banner>}
       <div className="share-grid">
+        {linkShares && (
+          <ShareLinkCard shares={linkShares} document={document} />
+        )}
         <section className="share-card" aria-labelledby="share-device">
           <h3 id="share-device" className="share-card__title">
             <Icon name="share" size={18} /> Share from this device

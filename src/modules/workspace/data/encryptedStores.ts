@@ -1,8 +1,9 @@
 import { parseDocument } from '@/modules/document/domain/schema';
-import type {
-  AssetMeta,
-  AssetStore,
-  DocumentStore,
+import {
+  isAssetMeta,
+  type AssetMeta,
+  type AssetStore,
+  type DocumentStore,
 } from '@/modules/workspace/data/stores';
 import {
   openJson,
@@ -31,13 +32,41 @@ interface SealedAssetRow {
   bytes: Sealed;
 }
 
+/** Sync bookkeeping rows (see `modules/sync/syncMeta.ts`); no secrets. */
+export interface SyncDesignRow {
+  id: string;
+  version: number;
+  /** 0/1 so it can be indexed. */
+  dirty: 0 | 1;
+  deleted: 0 | 1;
+}
+
+export interface SyncAssetRow {
+  id: string;
+  state: 'upload' | 'delete';
+}
+
+export interface SyncValueRow {
+  key: string;
+  value: string;
+}
+
 export class WorkspaceDatabase extends Dexie {
   declare documents: Table<SealedRow, string>;
   declare assets: Table<SealedAssetRow, string>;
+  declare syncDesigns: Table<SyncDesignRow, string>;
+  declare syncAssets: Table<SyncAssetRow, string>;
+  declare syncValues: Table<SyncValueRow, string>;
 
   constructor(name: string) {
     super(name);
     this.version(1).stores({ documents: 'id', assets: 'id' });
+    // Additive: existing workspaces gain empty sync tables.
+    this.version(2).stores({
+      syncDesigns: 'id, dirty',
+      syncAssets: 'id',
+      syncValues: 'key',
+    });
   }
 }
 
@@ -78,22 +107,6 @@ export function createEncryptedDocumentStore(
       await db.documents.delete(id);
     },
   };
-}
-
-function isAssetMeta(value: unknown): value is AssetMeta {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.id === 'string' &&
-    typeof record.name === 'string' &&
-    typeof record.mimeType === 'string' &&
-    typeof record.width === 'number' &&
-    typeof record.height === 'number' &&
-    typeof record.size === 'number' &&
-    typeof record.createdAt === 'string'
-  );
 }
 
 export function createEncryptedAssetStore(
