@@ -79,6 +79,38 @@ describe('Supabase remote workspace', () => {
     expect(await remote.fetchById('d1')).toBeNull();
   });
 
+  it('writes the next version only where the expected one still holds', async () => {
+    const { remote, respond, calls } = setup();
+    respond({ data: ROW }, { data: ROW }, { data: [] });
+    await remote.update(WRITE, 4);
+    const update = calls[0]?.chain ?? [];
+    expect(update.find(([name]) => name === 'update')?.[1][0]).toMatchObject({
+      version: 5,
+      ciphertext: WRITE.payload.ciphertext,
+      iv: WRITE.payload.iv,
+      deleted_at: null,
+    });
+    expect(
+      update.filter(([name]) => name === 'eq').map(([, args]) => args),
+    ).toEqual([
+      ['id', 'd1'],
+      ['version', 4],
+    ]);
+    // Tombstones send no ciphertext.
+    await remote.update({ ...WRITE, payload: null, deletedAt: 'now' }, 5);
+    expect(
+      calls[1]?.chain.find(([name]) => name === 'update')?.[1][0],
+    ).toMatchObject({ ciphertext: null, iv: null, deleted_at: 'now' });
+    // Keyset order: server time, then id, both ascending.
+    await remote.fetchChangedSince(null, 10);
+    expect(
+      calls[2]?.chain.filter(([name]) => name === 'order').map(([, a]) => a),
+    ).toEqual([
+      ['updated_at', { ascending: true }],
+      ['id', { ascending: true }],
+    ]);
+  });
+
   it('turns other errors into exceptions with context', async () => {
     const { remote, respond } = setup();
     const error = { message: 'boom' };

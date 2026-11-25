@@ -536,9 +536,39 @@ describe('studio route', () => {
     );
     expect(screen.queryByText(/changed on another device/)).toBeNull();
 
+    expect(
+      services.toasts.getState().toasts.map((toast) => toast.message),
+    ).toContain('Latest version loaded.');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Design name')).toHaveFocus();
+    });
+
+    // Dismissing keeps the editor's version and hides the notice.
+    await act(() =>
+      workspace.store
+        .getState()
+        .applyRemoteDocument({ ...document, name: 'Again elsewhere' }),
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByText(/changed on another device/)).toBeNull();
+    expect(screen.getByLabelText('Design name')).toHaveValue(
+      'Edited elsewhere',
+    );
+
+    // Deleted elsewhere, then brought back by the user's own edit: no
+    // misleading "changed on another device" afterwards.
     await act(() =>
       workspace.store.getState().removeRemoteDocument(document.id),
     );
     expect(screen.getByText(/deleted on another device/)).toBeInTheDocument();
+    act(() => {
+      workspace.store
+        .getState()
+        .saveDocument({ ...document, name: 'Kept editing' });
+    });
+    expect(screen.queryByText(/deleted on another device/)).toBeNull();
+    expect(screen.queryByText(/changed on another device/)).toBeNull();
   });
 });

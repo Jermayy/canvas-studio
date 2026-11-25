@@ -349,6 +349,11 @@ describe('App', () => {
       await within(dialog).findByText('Email or password is incorrect.'),
     ).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => {
+      expect(
+        within(dialog).getByRole('button', { name: 'Delete my account…' }),
+      ).toHaveFocus();
+    });
     await user.click(
       within(dialog).getByRole('button', { name: 'Delete my account…' }),
     );
@@ -462,6 +467,9 @@ describe('App', () => {
     expect(
       await screen.findByRole('heading', { name: 'This link isn’t available' }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Shared design' }),
+    ).toBeInTheDocument();
   });
 
   it('explains when a share link can’t be loaded', async () => {
@@ -573,5 +581,41 @@ describe('App', () => {
       await screen.findByRole('heading', { name: 'Projects' }),
     ).toBeInTheDocument();
     await screen.findByText('1 design');
+  });
+
+  it('keeps a published link when the clipboard refuses, and retries a failed check', async () => {
+    const cloud = createFakeCloud();
+    const shares = createFakeShareStore();
+    const realGet = shares.getForDesign;
+    shares.getForDesign = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockImplementation(realGet);
+    const { user, files, services } = start('/sign-up', { cloud, shares });
+    vi.mocked(files.copyText).mockRejectedValue(new Error('not allowed'));
+    await screen.findByRole('heading', { name: 'Create your studio' });
+    await signUp(user);
+    await user.click(screen.getByRole('button', { name: /Festive Dinner/ }));
+    await screen.findByRole('application');
+    await waitFor(() => {
+      expect(cloud.rows.size).toBe(1);
+    });
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    const dialog = screen.getByRole('dialog', { name: 'Share' });
+    expect(
+      await within(dialog).findByText(/Couldn’t check this design’s link/),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    await user.click(
+      await within(dialog).findByRole('button', { name: 'Create link' }),
+    );
+    const field = await within(dialog).findByLabelText('Share link');
+    await waitFor(() => {
+      expect(field).toHaveFocus();
+    });
+    expect(within(dialog).queryByText(/Couldn’t create the link/)).toBeNull();
+    expect(
+      services.toasts.getState().toasts.map((toast) => toast.message),
+    ).toContain('Link ready. Select it and copy it to share.');
   });
 });
