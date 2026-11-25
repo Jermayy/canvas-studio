@@ -1,6 +1,7 @@
 /**
- * Port for share links (ADR 0008). The Supabase adapter implements it;
- * tests use a fake.
+ * Port for view-only share links (ADR 0008, 0012). A share publishes a
+ * design's title and a PNG; the design itself stays encrypted. The
+ * Supabase adapter implements it; tests use a fake.
  */
 
 export interface DesignShare {
@@ -9,7 +10,7 @@ export interface DesignShare {
   title: string;
   width: number;
   height: number;
-  /** ISO timestamp of the last publish; busts image caches. */
+  /** ISO time of the last publish; busts image caches. */
   updatedAt: string;
 }
 
@@ -18,25 +19,21 @@ export interface PublishShareInput {
   title: string;
   width: number;
   height: number;
-  /** PNG bytes of the design. */
-  png: Uint8Array;
+  png: Blob;
 }
 
-/** What the public share page shows. */
+/** What the public page shows. */
 export interface SharedDesignView extends DesignShare {
   imageUrl: string;
 }
 
 export interface ShareStore {
-  /** The current share of a design, or null if it isn't shared. */
-  getForDesign(designId: string): Promise<DesignShare | null>;
+  /** The design's current share, or null if it isn't shared. */
+  getForDesign: (designId: string) => Promise<DesignShare | null>;
   /** Creates the share, or refreshes its image and title; keeps the link. */
-  publish(input: PublishShareInput): Promise<DesignShare>;
+  publish: (input: PublishShareInput) => Promise<DesignShare>;
   /** Deletes the image, then the link. No-op if not shared. */
-  unpublish(designId: string): Promise<void>;
+  unpublish: (designId: string) => Promise<void>;
+  /** Public read by token; null when it doesn't exist (any more). */
+  fetchShared: (shareId: string) => Promise<SharedDesignView | null>;
 }
-
-/** Loads a public share by token; null when it doesn't exist (any more). */
-export type FetchSharedDesign = (
-  shareId: string,
-) => Promise<SharedDesignView | null>;

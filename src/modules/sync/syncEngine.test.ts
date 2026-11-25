@@ -1,536 +1,1060 @@
+import { createImage } from '@/modules/document/domain/elementFactory';
+import type { DesignDocument } from '@/modules/document/domain/schema';
 import {
-  AssetRepository,
-  sha256Hex,
-} from '@/modules/designs/data/assetRepository';
+  InvalidAssetEnvelopeError,
+  openAsset,
+  referencedAssetIds,
+  sealAsset,
+} from '@/modules/sync/envelope';
 import {
-  openWorkspaceDb,
-  type CanvasStudioDb,
-} from '@/modules/designs/data/localDb';
-import { LocalDesignRepository } from '@/modules/designs/data/localDesignRepository';
-import {
-  crossTabExclusive,
-  type LockManagerLike,
-} from '@/modules/sync/crossTabLock';
-import {
-  SyncEngine,
-  type SyncEngineDeps,
-  type SyncStatus,
+  browserConnectivity,
+  CONFLICT_SUFFIX,
+  createSyncEngine,
+  type Connectivity,
 } from '@/modules/sync/syncEngine';
-import { FakeRemoteStore } from '@/test/fakeRemoteStore';
-import { buildDocument, buildRect } from '@/test/factories';
+import type { RemoteWorkspace } from '@/modules/sync/remoteWorkspace';
+import {
+  createMemorySyncMetaStore,
+  type SyncMetaStore,
+} from '@/modules/sync/syncMeta';
+import { workspaceSyncTarget } from '@/modules/sync/workspaceTarget';
+import {
+  createMemoryAssetStore,
+  createMemoryDocumentStore,
+  type AssetStore,
+  type DocumentStore,
+} from '@/modules/workspace/data/stores';
+import {
+  createWorkspaceStore,
+  type WorkspaceStore,
+} from '@/modules/workspace/state/workspaceStore';
+import { createAesGcmCipher } from '@/shared/crypto/aesGcm';
 import { createLogger } from '@/shared/logger';
+import { createFakeCloud, type FakeCloud } from '@/test/fakeCloud';
+import { makeDocument, NOW, pngFile, rect } from '@/test/factories';
 
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7])
-  .buffer;
+const logger = createLogger({ service: 'test', sink: () => undefined });
 
-let db: CanvasStudioDb;
-let local: LocalDesignRepository;
-let assets: AssetRepository;
-let remote: FakeRemoteStore;
-let online: boolean;
-let logLines: string[];
-let engine: SyncEngine;
+function newKey() {
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, [
+    'encrypt',
+    'decrypt',
+  ]);
+}
 
-function makeEngine(overrides: Partial<SyncEngineDeps> = {}) {
-  return new SyncEngine({
-    local,
-    assets,
-    remote,
+function connectivity(initial = true) {
+  let online = initial;
+  const listeners = new Set<() => void>();
+  const value: Connectivity & { set: (next: boolean) => void } = {
     isOnline: () => online,
-    logger: createLogger({
-      service: 'test',
-      sink: (_l, line) => logLines.push(line),
-    }),
-    pollIntervalMs: 10_000,
-    debounceMs: 100,
-    ...overrides,
-  });
-}
-
-function remoteWrite(
-  id: string,
-  title: string,
-  deletedAt: string | null = null,
-) {
-  return {
-    id,
-    title,
-    document: buildDocument([buildRect({ id: `${id}-rect` })]),
-    clientUpdatedAt: '2026-01-01T00:00:00.000Z',
-    deletedAt,
-  };
-}
-
-beforeEach(() => {
-  db = openWorkspaceDb(`sync-${crypto.randomUUID()}`);
-  local = new LocalDesignRepository(db);
-  assets = new AssetRepository(db);
-  remote = new FakeRemoteStore();
-  online = true;
-  logLines = [];
-  engine = makeEngine();
-});
-
-afterEach(async () => {
-  engine.stop();
-  vi.useRealTimers();
-  await db.delete();
-});
-
-describe('SyncEngine push', () => {
-  it('uploads new designs and marks them clean', async () => {
-    const created = await local.create('Party', buildDocument());
-
-    await engine.syncNow();
-
-    expect(remote.rows.get(created.id)).toMatchObject({
-      title: 'Party',
-      version: 1,
-    });
-    expect(await local.get(created.id)).toMatchObject({ version: 1, dirty: 0 });
-    expect(engine.getStatus()).toMatchObject({ state: 'idle' });
-  });
-
-  it('pushes subsequent edits with the expected version', async () => {
-    const created = await local.create('Party', buildDocument());
-    await engine.syncNow();
-
-    await local.saveEdit(created.id, { title: 'Renamed' });
-    await engine.syncNow();
-
-    expect(remote.rows.get(created.id)).toMatchObject({
-      title: 'Renamed',
-      version: 2,
-    });
-    expect(await local.get(created.id)).toMatchObject({ version: 2, dirty: 0 });
-  });
-
-  it('pushes deletions as tombstones and removes the local record', async () => {
-    const created = await local.create('Party', buildDocument());
-    await engine.syncNow();
-
-    await local.remove(created.id);
-    await engine.syncNow();
-
-    expect(remote.rows.get(created.id)?.deletedAt).not.toBeNull();
-    expect(await local.get(created.id)).toBeUndefined();
-  });
-
-  it('uploads pending images before the designs that use them', async () => {
-    const asset = await assets.addUpload('image/png', PNG);
-
-    await engine.syncNow();
-
-    expect(remote.assets.has(asset.id)).toBe(true);
-    expect(await assets.listPendingUpload()).toEqual([]);
-  });
-});
-
-describe('SyncEngine pull', () => {
-  it('downloads designs created on another device', async () => {
-    remote.serverWrite(remoteWrite('other-1', 'From laptop'));
-
-    await engine.syncNow();
-
-    expect(await local.get('other-1')).toMatchObject({
-      title: 'From laptop',
-      version: 1,
-      dirty: 0,
-    });
-  });
-
-  it('notifies listeners about remotely changed designs', async () => {
-    const listener = vi.fn();
-    engine.onRemoteChanges(listener);
-    remote.serverWrite(remoteWrite('other-1', 'A'));
-
-    await engine.syncNow();
-
-    expect(listener).toHaveBeenCalledWith(['other-1']);
-  });
-
-  it('applies remote deletions', async () => {
-    remote.serverWrite(remoteWrite('other-1', 'A'));
-    await engine.syncNow();
-
-    remote.serverWrite(remoteWrite('other-1', 'A', '2026-01-02T00:00:00.000Z'));
-    await engine.syncNow();
-
-    expect(await local.get('other-1')).toBeUndefined();
-  });
-
-  it('pages through large change sets', async () => {
-    engine = makeEngine({ pageSize: 2 });
-    for (const id of ['a', 'b', 'c', 'd', 'e']) {
-      remote.serverWrite(remoteWrite(id, id));
-    }
-
-    await engine.syncNow();
-
-    expect((await local.list()).map((record) => record.id).sort()).toEqual([
-      'a',
-      'b',
-      'c',
-      'd',
-      'e',
-    ]);
-  });
-
-  it('skips remote documents that fail validation', async () => {
-    remote.serverWrite({
-      ...remoteWrite('bad', 'Bad'),
-      document: { evil: true },
-    });
-
-    await engine.syncNow();
-
-    expect(await local.get('bad')).toBeUndefined();
-    expect(logLines.join()).toContain('sync.invalid_remote_document');
-  });
-
-  it('pauses with update-required on designs from a newer app version', async () => {
-    remote.serverWrite({
-      ...remoteWrite('future', 'Future'),
-      document: { ...buildDocument(), schemaVersion: 99 },
-    });
-
-    await engine.syncNow();
-
-    expect(engine.getStatus()).toEqual({ state: 'update-required' });
-    expect(await local.get('future')).toBeUndefined();
-    expect(logLines.join()).toContain('sync.newer_schema_version');
-    // The cursor stays put so the design is pulled again after a reload.
-    expect(await local.getMeta('pull-cursor')).toBeUndefined();
-  });
-
-  it('downloads images referenced by pulled designs', async () => {
-    const assetId = await sha256Hex(PNG);
-    remote.assets.set(assetId, { bytes: PNG, mime: 'image/png' });
-    remote.serverWrite({
-      ...remoteWrite('img', 'With image'),
-      document: buildDocument([
-        {
-          id: 'i',
-          type: 'image',
-          x: 0,
-          y: 0,
-          rotation: 0,
-          opacity: 1,
-          width: 10,
-          height: 10,
-          source: { kind: 'upload', assetId },
-        },
-      ]),
-    });
-
-    await engine.syncNow();
-
-    expect(await assets.has(assetId)).toBe(true);
-  });
-
-  it('logs missing remote images without failing the sync', async () => {
-    remote.serverWrite({
-      ...remoteWrite('img', 'Missing image'),
-      document: buildDocument([
-        {
-          id: 'i',
-          type: 'image',
-          x: 0,
-          y: 0,
-          rotation: 0,
-          opacity: 1,
-          width: 10,
-          height: 10,
-          source: { kind: 'upload', assetId: 'f'.repeat(64) },
-        },
-      ]),
-    });
-
-    await engine.syncNow();
-
-    expect(await local.get('img')).toBeDefined();
-    expect(logLines.join()).toContain('sync.asset_missing');
-  });
-
-  it('recovers from a corrupt cursor with a full pull', async () => {
-    await local.setMeta('pull-cursor', 'not json');
-    remote.serverWrite(remoteWrite('x', 'X'));
-
-    await engine.syncNow();
-
-    expect(await local.get('x')).toBeDefined();
-    expect(logLines.join()).toContain('sync.cursor_reset');
-  });
-
-  it('does not re-apply its own pushes', async () => {
-    const created = await local.create('Mine', buildDocument());
-    await engine.syncNow();
-    const listener = vi.fn();
-    engine.onRemoteChanges(listener);
-
-    await engine.syncNow();
-
-    expect(listener).not.toHaveBeenCalled();
-    expect(await local.get(created.id)).toMatchObject({ dirty: 0 });
-  });
-});
-
-/** In-memory stand-in for navigator.locks: one holder at a time, FIFO. */
-function fakeLockManager(): LockManagerLike {
-  let tail: Promise<unknown> = Promise.resolve();
-  return {
-    request: (_name, callback) => {
-      const run = tail.then(callback);
-      tail = run.catch(() => undefined);
-      return run;
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set: (next) => {
+      online = next;
+      for (const listener of listeners) {
+        listener();
+      }
     },
   };
+  return value;
 }
 
-describe('SyncEngine across browser tabs', () => {
-  /** Two engines on one database (two tabs) sync the same edit at once. */
-  async function syncEditFromTwoTabs(locks: LockManagerLike | undefined) {
-    const created = await local.create('Party', buildDocument());
-    await engine.syncNow();
-    await local.saveEdit(created.id, { title: 'Renamed' });
-    // Real requests take time; without it the passes never interleave.
-    const update = remote.update.bind(remote);
-    const updateSpy = vi
-      .spyOn(remote, 'update')
-      .mockImplementation(async (...args) => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        return update(...args);
-      });
-    const runExclusive = crossTabExclusive('sync:test', locks);
-    const tabA = makeEngine({ runExclusive });
-    const tabB = makeEngine({ runExclusive });
+let deviceCounter = 0;
 
-    await Promise.all([tabA.syncNow(), tabB.syncNow()]);
+/** One browser signed in to the account: a real workspace store + engine. */
+async function device(
+  cloud: FakeCloud,
+  key: CryptoKey,
+  options: {
+    saveDelayMs?: number;
+    pageSize?: number;
+    online?: boolean;
+    retryBaseMs?: number;
+    pollIntervalMs?: number;
+    remote?: (base: RemoteWorkspace) => RemoteWorkspace;
+    meta?: (base: SyncMetaStore) => SyncMetaStore;
+    documents?: (base: DocumentStore) => DocumentStore;
+    /** Writes straight to storage before the workspace loads. */
+    seed?: (stores: {
+      documents: DocumentStore;
+      assets: AssetStore;
+    }) => Promise<void>;
+    sink?: NonNullable<Parameters<typeof createLogger>[0]['sink']>;
+  } = {},
+) {
+  deviceCounter += 1;
+  const prefix = String(deviceCounter).padStart(4, '0');
+  let ids = 0;
+  const createId = () => {
+    ids += 1;
+    return `${prefix}0000-0000-4000-8000-${String(ids).padStart(12, '0')}`;
+  };
+  const baseMeta = createMemorySyncMetaStore();
+  const meta = options.meta ? options.meta(baseMeta) : baseMeta;
+  const baseDocuments = createMemoryDocumentStore();
+  const assets = createMemoryAssetStore();
+  await options.seed?.({ documents: baseDocuments, assets });
+  const deviceLogger = options.sink
+    ? createLogger({ service: 'test', sink: options.sink })
+    : logger;
+  const network = connectivity(options.online ?? true);
+  const holder: { store?: WorkspaceStore } = {};
+  const engine = createSyncEngine({
+    remote: options.remote
+      ? options.remote(cloud.workspace())
+      : cloud.workspace(),
+    meta,
+    target: workspaceSyncTarget(
+      () => {
+        if (!holder.store) {
+          throw new Error('not ready');
+        }
+        return holder.store;
+      },
+      { createId, now: () => NOW },
+    ),
+    cipher: createAesGcmCipher(key),
+    connectivity: network,
+    logger: deviceLogger,
+    now: () => NOW,
+    debounceMs: 0,
+    pollIntervalMs: options.pollIntervalMs ?? 60_000,
+    retryBaseMs: options.retryBaseMs ?? 60_000,
+    pageSize: options.pageSize,
+  });
+  const store = createWorkspaceStore({
+    documents: options.documents
+      ? options.documents(baseDocuments)
+      : baseDocuments,
+    assets,
+    logger,
+    persistent: true,
+    now: () => NOW,
+    createId,
+    readImageSize: () => Promise.resolve({ width: 640, height: 480 }),
+    onPersisted: engine.enqueue,
+    onRemoved: engine.markDeleted,
+    onAssetAdded: engine.assetAdded,
+    onAssetRemoved: engine.assetRemoved,
+    saveDelayMs: options.saveDelayMs ?? 0,
+  });
+  holder.store = store;
+  await store.getState().load();
+  const docs = () => Object.values(store.getState().documents);
+  return { store, engine, meta, network, docs, createId };
+}
 
-    return { created, updates: updateSpy.mock.calls.length };
+async function edited(
+  store: WorkspaceStore,
+  document: DesignDocument,
+  name: string,
+) {
+  store.getState().saveDocument({ ...document, name });
+  await store.getState().flush();
+}
+
+const DOC_ID = '00000000-0000-4000-8000-0000000000d1';
+
+describe('sync engine', () => {
+  let cloud: FakeCloud;
+  let key: CryptoKey;
+  const engines: { dispose: () => Promise<void> }[] = [];
+
+  beforeEach(async () => {
+    cloud = createFakeCloud();
+    key = await newKey();
+  });
+
+  afterEach(async () => {
+    await Promise.all(engines.splice(0).map((engine) => engine.dispose()));
+  });
+
+  async function track(created: Promise<Awaited<ReturnType<typeof device>>>) {
+    const value = await created;
+    engines.push(value.engine);
+    return value;
   }
 
-  it('sends duplicate, conflicting writes when tabs sync concurrently', async () => {
-    // Documents the race the lock prevents (no work is lost either way).
-    const { updates } = await syncEditFromTwoTabs(undefined);
+  it('uploads only ciphertext and another device opens it with the same key', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const design = makeDocument({ id: DOC_ID, name: 'Secret gala poster' });
+    await a.store.getState().createDocument(design);
 
-    expect(updates).toBe(2);
-    expect(logLines.join()).toContain('sync.conflict');
+    await a.engine.syncNow();
+
+    const row = cloud.rows.get(DOC_ID);
+    expect(row?.version).toBe(1);
+    expect(JSON.stringify(row)).not.toContain('Secret gala');
+    expect(a.engine.store.getState()).toMatchObject({
+      status: 'synced',
+      pending: 0,
+      lastSyncedAt: NOW,
+    });
+
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toEqual(design);
+    expect(b.store.getState().remoteRevisions[DOC_ID]).toBe(1);
+    // Pulling it again (our own echo, or an overlapping cursor) is a no-op.
+    await b.engine.syncNow();
+    expect(b.store.getState().remoteRevisions[DOC_ID]).toBe(1);
   });
 
-  it('pushes a shared edit exactly once when passes hold the lock', async () => {
-    const { created, updates } = await syncEditFromTwoTabs(fakeLockManager());
+  it('pushes later edits as new versions and the other device follows', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const design = makeDocument({ id: DOC_ID });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+    await b.engine.syncNow();
 
-    expect(updates).toBe(1);
-    expect(remote.rows.get(created.id)).toMatchObject({
-      title: 'Renamed',
-      version: 2,
+    await edited(a.store, design, 'Renamed on A');
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+
+    expect(cloud.rows.get(DOC_ID)?.version).toBe(2);
+    expect(b.store.getState().documents[DOC_ID]?.name).toBe('Renamed on A');
+  });
+
+  it('keeps both edits on a conflict: the server copy wins and mine becomes a copy', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const design = makeDocument({ id: DOC_ID, name: 'Poster' });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+
+    await edited(a.store, design, 'A’s version');
+    await edited(b.store, design, 'B’s version');
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+
+    const names = b
+      .docs()
+      .map((document) => document.name)
+      .sort();
+    expect(names).toEqual(['A’s version', `B’s version${CONFLICT_SUFFIX}`]);
+    // The copy was pushed too, so A gets it on its next pull.
+    await b.engine.syncNow();
+    await a.engine.syncNow();
+    expect(a.docs()).toHaveLength(2);
+    expect(cloud.rows.size).toBe(2);
+  });
+
+  it('treats an edit that hasn’t been stored yet as a conflict, not something to overwrite', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key, { saveDelayMs: 60_000 }));
+    const design = makeDocument({ id: DOC_ID });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+
+    await edited(a.store, design, 'Remote edit');
+    await a.engine.syncNow();
+    b.store.getState().saveDocument({ ...design, name: 'Typing on B' });
+    await b.engine.syncNow();
+
+    expect(
+      b
+        .docs()
+        .map((document) => document.name)
+        .sort(),
+    ).toEqual(['Remote edit', `Typing on B${CONFLICT_SUFFIX}`]);
+  });
+
+  it('syncs deletions as tombstones without ciphertext, and restores resurrect', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const design = makeDocument({ id: DOC_ID });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+
+    const removed = await a.store.getState().removeDocument(DOC_ID);
+    await a.engine.syncNow();
+    expect(cloud.rows.get(DOC_ID)).toMatchObject({ payload: null, version: 2 });
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toBeUndefined();
+
+    await a.store.getState().restoreDocument(removed ?? design);
+    await a.engine.syncNow();
+    expect(cloud.rows.get(DOC_ID)).toMatchObject({
+      version: 3,
+      deletedAt: null,
     });
-    expect((await local.list()).map((record) => record.title)).toEqual([
-      'Renamed',
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toBeDefined();
+  });
+
+  it('never tells the server about a design deleted before it synced', async () => {
+    const a = await track(device(cloud, key, { online: false }));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.store.getState().removeDocument(DOC_ID);
+    a.network.set(true);
+    await a.engine.syncNow();
+    expect(cloud.calls).not.toContain('insert');
+    expect(cloud.calls).not.toContain('update');
+    expect(await a.meta.getDesign(DOC_ID)).toBeNull();
+  });
+
+  it('uploads images sealed, downloads them on the device that needs them, and deletes them', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const asset = await a.store.getState().addImage(pngFile('logo.png'));
+    const design = makeDocument({
+      id: DOC_ID,
+      elements: [createImage('img-1', asset, { width: 1000, height: 1000 })],
+    });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+
+    const envelope = cloud.assets.get(asset.id) ?? '';
+    expect(envelope).not.toContain('logo.png');
+    await b.engine.syncNow();
+    expect(b.store.getState().assets).toEqual([asset]);
+    expect((await b.store.getState().getAssetBlob(asset.id))?.size).toBe(64);
+
+    await a.store.getState().removeAsset(asset.id);
+    await a.engine.syncNow();
+    expect(cloud.assets.has(asset.id)).toBe(false);
+  });
+
+  it('pages through large pulls', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key, { pageSize: 2 }));
+    for (let index = 0; index < 5; index += 1) {
+      await a.store
+        .getState()
+        .createDocument(makeDocument({ id: a.createId(), elements: [rect()] }));
+    }
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+    expect(b.docs()).toHaveLength(5);
+  });
+
+  it('pauses on failure with the reason, keeps the work queued and recovers on retry', async () => {
+    const a = await track(device(cloud, key));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    cloud.failNext(1, 'gateway timeout');
+
+    await a.engine.syncNow();
+    expect(a.engine.store.getState()).toMatchObject({
+      status: 'error',
+      lastError: 'gateway timeout',
+      pending: 1,
+    });
+
+    a.engine.retryNow();
+    await vi.waitFor(() => {
+      expect(a.engine.store.getState().status).toBe('synced');
+    });
+    expect(cloud.rows.has(DOC_ID)).toBe(true);
+  });
+
+  it('waits offline and syncs when the connection returns', async () => {
+    const a = await track(device(cloud, key, { online: false }));
+    a.engine.start();
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    expect(a.engine.store.getState().status).toBe('offline');
+    expect(cloud.calls).toEqual([]);
+
+    a.network.set(true);
+    await vi.waitFor(() => {
+      expect(cloud.rows.has(DOC_ID)).toBe(true);
+    });
+    a.network.set(false);
+    expect(a.engine.store.getState()).toMatchObject({
+      status: 'offline',
+      live: false,
+    });
+  });
+
+  it('refuses designs it can’t open instead of applying them', async () => {
+    const a = await track(device(cloud, key));
+    const stranger = await track(device(cloud, await newKey()));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+
+    await stranger.engine.syncNow();
+    expect(stranger.engine.store.getState()).toMatchObject({
+      status: 'error',
+      lastError: expect.stringContaining('couldn’t be opened'),
+    });
+    expect(stranger.docs()).toEqual([]);
+  });
+
+  it('pulls on realtime notifications and reports when it’s live', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    b.engine.start();
+    await vi.waitFor(() => {
+      expect(b.engine.store.getState().status).toBe('synced');
+    });
+    cloud.setRealtime('connected');
+    expect(b.engine.store.getState().live).toBe(true);
+
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    cloud.notify();
+    await vi.waitFor(() => {
+      expect(b.store.getState().documents[DOC_ID]).toBeDefined();
+    });
+    cloud.setRealtime('disconnected');
+    expect(b.engine.store.getState().live).toBe(false);
+  });
+
+  it('runs one pass at a time and coalesces overlapping requests', async () => {
+    const a = await track(device(cloud, key));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await Promise.all([
+      a.engine.syncNow(),
+      a.engine.syncNow(),
+      a.engine.syncNow(),
     ]);
-    expect(logLines.join()).not.toContain('sync.conflict');
+    expect(cloud.calls.filter((call) => call === 'insert')).toHaveLength(1);
+    expect(
+      cloud.calls.filter((call) => call === 'fetchChangedSince'),
+    ).toHaveLength(2);
   });
 });
 
-describe('SyncEngine conflicts', () => {
-  it('keeps the server copy and saves local edits as a conflicted copy', async () => {
-    const created = await local.create('Poster', buildDocument());
-    await engine.syncNow();
-    remote.serverWrite({
-      ...remoteWrite(created.id, 'Poster (edited elsewhere)'),
+describe('sync engine edge cases', () => {
+  let cloud: FakeCloud;
+  let key: CryptoKey;
+  const engines: { dispose: () => Promise<void> }[] = [];
+
+  beforeEach(async () => {
+    cloud = createFakeCloud();
+    key = await newKey();
+  });
+
+  afterEach(async () => {
+    await Promise.all(engines.splice(0).map((engine) => engine.dispose()));
+  });
+
+  async function track(created: Promise<Awaited<ReturnType<typeof device>>>) {
+    const value = await created;
+    engines.push(value.engine);
+    return value;
+  }
+
+  it('retries by itself after a failure, and polls for changes', async () => {
+    const a = await track(device(cloud, key, { retryBaseMs: 5 }));
+    const b = await track(device(cloud, key, { pollIntervalMs: 20 }));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    cloud.failNext(1);
+    await a.engine.syncNow();
+    expect(a.engine.store.getState().status).toBe('error');
+    await vi.waitFor(() => {
+      expect(cloud.rows.has(DOC_ID)).toBe(true);
     });
-    await local.saveEdit(created.id, { title: 'Poster (edited here)' });
-
-    await engine.syncNow();
-
-    const titles = (await local.list()).map((record) => record.title).sort();
-    expect(titles).toEqual([
-      'Poster (edited elsewhere)',
-      'Poster (edited here) (conflicted copy)',
-    ]);
-    expect(logLines.join()).toContain('sync.conflict');
-  });
-
-  it('does not pile up conflicted copies when the server copy is from a newer app', async () => {
-    const created = await local.create('Poster', buildDocument());
-    await engine.syncNow();
-    remote.serverWrite({
-      ...remoteWrite(created.id, 'Poster (newer app)'),
-      document: { ...buildDocument(), schemaVersion: 99 },
+    b.engine.start();
+    b.engine.start();
+    await vi.waitFor(() => {
+      expect(b.store.getState().documents[DOC_ID]).toBeDefined();
     });
-    await local.saveEdit(created.id, { title: 'Poster (edited here)' });
-
-    await engine.syncNow();
-    await engine.syncNow();
-
-    expect((await local.list()).map((record) => record.title)).toEqual([
-      'Poster (edited here)',
-    ]);
-    expect(await local.get(created.id)).toMatchObject({ dirty: 1 });
-    expect(engine.getStatus()).toEqual({ state: 'update-required' });
   });
 
-  it('does not create a copy when both sides made the same change', async () => {
-    const document = buildDocument();
-    const created = await local.create('Same', document);
-    await engine.syncNow();
-    remote.serverWrite({ ...remoteWrite(created.id, 'Same'), document });
-    await local.saveEdit(created.id, { title: 'Same' });
-
-    await engine.syncNow();
-
-    expect(await local.list()).toHaveLength(1);
-    expect(await local.get(created.id)).toMatchObject({ version: 2, dirty: 0 });
-  });
-
-  it('adopts the server copy when an insert finds the id already exists', async () => {
-    const created = await local.create('Dup', buildDocument());
-    remote.serverWrite({
-      ...remoteWrite(created.id, 'Dup'),
-      document: created.document,
-    });
-
-    await engine.syncNow();
-
-    expect(await local.list()).toHaveLength(1);
-    expect(await local.get(created.id)).toMatchObject({ dirty: 0, version: 1 });
-  });
-
-  it('keeps local work when the server row has vanished', async () => {
-    const created = await local.create('Gone', buildDocument());
-    await engine.syncNow();
-    remote.rows.delete(created.id);
-    await local.saveEdit(created.id, { title: 'Gone but edited' });
-
-    await engine.syncNow();
-
-    expect(await local.get(created.id)).toBeUndefined();
-    const titles = (await local.list()).map((record) => record.title);
-    expect(titles).toEqual(['Gone but edited (conflicted copy)']);
-  });
-
-  it('treats a pulled newer version over a dirty local record as a conflict', async () => {
-    const created = await local.create('P', buildDocument());
-    await engine.syncNow();
-    await local.saveEdit(created.id, { title: 'Local edit' });
-    remote.serverWrite({ ...remoteWrite(created.id, 'Remote edit') });
-    // Make the push see no conflict so the pull path handles it.
-    const dirtyBefore = await local.get(created.id);
-    vi.spyOn(local, 'listDirty').mockResolvedValueOnce([]);
-
-    await engine.syncNow();
-
-    expect(dirtyBefore?.dirty).toBe(1);
-    const titles = (await local.list()).map((record) => record.title).sort();
-    expect(titles).toEqual(['Local edit (conflicted copy)', 'Remote edit']);
-  });
-});
-
-describe('SyncEngine status and scheduling', () => {
-  it('reports offline and skips network calls without connectivity', async () => {
-    online = false;
-    await local.create('Offline work', buildDocument());
-
-    await engine.syncNow();
-
-    expect(engine.getStatus()).toEqual({ state: 'offline' });
-    expect(remote.rows.size).toBe(0);
-  });
-
-  it('reports errors and recovers on the next run', async () => {
-    await local.create('A', buildDocument());
-    remote.failNext = new Error('network down');
-
-    await engine.syncNow();
-    expect(engine.getStatus()).toEqual({
-      state: 'error',
-      message: 'network down',
-    });
-
-    await engine.syncNow();
-    expect(engine.getStatus()).toMatchObject({ state: 'idle' });
-  });
-
-  it('reports offline when the connection drops mid-sync', async () => {
-    remote.failNext = new Error('fetch failed');
-    const original = remote.fetchChangedSince.bind(remote);
-    vi.spyOn(remote, 'fetchChangedSince').mockImplementationOnce((...args) => {
-      online = false;
-      return original(...args);
-    });
-
-    await engine.syncNow();
-
-    expect(engine.getStatus()).toEqual({ state: 'offline' });
-  });
-
-  it('broadcasts status changes to listeners and supports unsubscribe', async () => {
-    const statuses: SyncStatus['state'][] = [];
-    const unsubscribe = engine.onStatus((status) =>
-      statuses.push(status.state),
+  it('skips images it can’t find or open, and still shows the design', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const asset = await a.store.getState().addImage(pngFile());
+    const other = await a.store.getState().addImage(pngFile('two.png'));
+    const canvas = { width: 1000, height: 1000 };
+    await a.store.getState().createDocument(
+      makeDocument({
+        id: DOC_ID,
+        elements: [
+          createImage('i1', asset, canvas),
+          createImage('i2', other, canvas),
+        ],
+      }),
     );
+    await a.engine.syncNow();
+    cloud.assets.delete(asset.id);
+    cloud.assets.set(other.id, 'corrupt');
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toBeDefined();
+    expect(b.store.getState().assets).toEqual([]);
+  });
 
-    await engine.syncNow();
+  it('refuses a design whose sealed content claims another id', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    const row = cloud.rows.get(DOC_ID);
+    const swapped = '00000000-0000-4000-8000-0000000000d9';
+    if (row) {
+      cloud.rows.set(swapped, { ...row, id: swapped, updatedAt: 'z' });
+    }
+    await b.engine.syncNow();
+    expect(b.engine.store.getState().status).toBe('error');
+    expect(b.store.getState().documents[swapped]).toBeUndefined();
+  });
+
+  it('keeps a local edit as a copy when the design was deleted elsewhere', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const design = makeDocument({ id: DOC_ID, name: 'Poster' });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+    await a.store.getState().removeDocument(DOC_ID);
+    await a.engine.syncNow();
+    await edited(b.store, design, 'Still working on it');
+    await b.engine.syncNow();
+    expect(b.docs().map((document) => document.name)).toEqual([
+      `Still working on it${CONFLICT_SUFFIX}`,
+    ]);
+  });
+
+  it('moves the work to a copy if the id can’t be used in the cloud', async () => {
+    const a = await track(
+      device(cloud, key, {
+        remote: (base) => ({
+          ...base,
+          insert: (write) =>
+            write.id === DOC_ID ? Promise.resolve(null) : base.insert(write),
+          fetchById: () => Promise.resolve(null),
+        }),
+      }),
+    );
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    expect(a.store.getState().documents[DOC_ID]).toBeUndefined();
+    expect(a.docs()).toHaveLength(1);
+    expect(await a.meta.getDesign(DOC_ID)).toBeNull();
+  });
+
+  it('re-pulls everything when the cursor is corrupt', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    await b.meta.setCursor({ updatedAt: 'garbage', id: 'x' });
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toBeDefined();
+  });
+
+  it('logs bookkeeping failures without breaking later syncs', async () => {
+    let failing = true;
+    const a = await track(
+      device(cloud, key, {
+        meta: (base) => ({
+          ...base,
+          updateDesign: (id, change) =>
+            failing
+              ? Promise.reject(new Error('disk full'))
+              : base.updateDesign(id, change),
+        }),
+      }),
+    );
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    expect(cloud.rows.size).toBe(0);
+    failing = false;
+    await a.store.getState().createDocument(makeDocument({ id: a.createId() }));
+    await a.engine.syncNow();
+    expect(cloud.rows.size).toBe(1);
+  });
+
+  it('does nothing once disposed', async () => {
+    const a = await device(cloud, key);
+    await a.engine.dispose();
+    a.engine.start();
+    await a.engine.syncNow();
+    expect(cloud.calls).toEqual([]);
+  });
+
+  it('follows the browser’s online and offline events', () => {
+    const target = new EventTarget() as EventTarget & {
+      navigator: { onLine: boolean };
+    };
+    target.navigator = { onLine: false };
+    const network = browserConnectivity(target as unknown as Window);
+    const onChange = vi.fn();
+    const unsubscribe = network.subscribe(onChange);
+    expect(network.isOnline()).toBe(false);
+    target.dispatchEvent(new Event('online'));
+    target.dispatchEvent(new Event('offline'));
     unsubscribe();
-    await engine.syncNow();
+    target.dispatchEvent(new Event('online'));
+    expect(onChange).toHaveBeenCalledTimes(2);
+  });
+});
 
-    expect(statuses).toEqual(['offline', 'syncing', 'idle']);
+describe('sealed envelopes', () => {
+  it('round-trips images and rejects anything malformed', async () => {
+    const cipher = createAesGcmCipher(await newKey());
+    const meta = {
+      id: 'a1',
+      name: 'photo.png',
+      mimeType: 'image/png',
+      width: 10,
+      height: 10,
+      size: 3,
+      createdAt: new Date(NOW).toISOString(),
+    };
+    const sealed = await sealAsset(
+      cipher,
+      meta,
+      new Blob([new Uint8Array([1, 2, 3])]),
+    );
+    const opened = await openAsset(cipher, sealed);
+    expect(opened.meta).toEqual(meta);
+    expect(opened.blob.type).toBe('image/png');
+    await expect(openAsset(cipher, '{"v":2}')).rejects.toBeInstanceOf(
+      InvalidAssetEnvelopeError,
+    );
+    await expect(openAsset(cipher, 'not json')).rejects.toBeInstanceOf(
+      InvalidAssetEnvelopeError,
+    );
   });
 
-  it('coalesces concurrent sync calls into one rerun', async () => {
-    const spy = vi.spyOn(remote, 'fetchChangedSince');
-
-    await Promise.all([engine.syncNow(), engine.syncNow(), engine.syncNow()]);
-
-    expect(spy).toHaveBeenCalledTimes(2);
-  });
-
-  it('debounces requests and polls on an interval once started', async () => {
-    vi.useFakeTimers({
-      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+  it('lists each image a design uses once', () => {
+    const asset = { id: 'a1', width: 10, height: 10, name: 'x.png' };
+    const canvas = { width: 100, height: 100 };
+    const design = makeDocument({
+      elements: [
+        createImage('i1', asset, canvas),
+        createImage('i2', asset, canvas),
+        rect(),
+      ],
     });
-    const spy = vi.spyOn(engine, 'syncNow');
+    expect(referencedAssetIds(design)).toEqual(['a1']);
+  });
+});
 
-    engine.start();
-    engine.start();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(spy).toHaveBeenCalledTimes(1);
+/** A promise you resolve from outside (to hold a remote call mid-flight). */
+function deferred() {
+  let release: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
 
-    engine.requestSync();
-    engine.requestSync();
-    await vi.advanceTimersByTimeAsync(100);
-    expect(spy).toHaveBeenCalledTimes(2);
+describe('sync engine review fixes', () => {
+  let cloud: FakeCloud;
+  let key: CryptoKey;
+  const engines: { dispose: () => Promise<void> }[] = [];
 
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(spy).toHaveBeenCalledTimes(3);
-
-    engine.requestSync();
-    engine.stop();
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(spy).toHaveBeenCalledTimes(3);
-    expect(remote.unsubscribed).toBe(true);
+  beforeEach(async () => {
+    cloud = createFakeCloud();
+    key = await newKey();
   });
 
-  it('syncs on realtime events and tracks live status', async () => {
-    vi.useFakeTimers({
-      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+  afterEach(async () => {
+    await Promise.all(engines.splice(0).map((engine) => engine.dispose()));
+  });
+
+  async function track(created: Promise<Awaited<ReturnType<typeof device>>>) {
+    const value = await created;
+    engines.push(value.engine);
+    return value;
+  }
+
+  async function sharedDesign(a: Awaited<ReturnType<typeof device>>) {
+    const design = makeDocument({ id: DOC_ID, name: 'Poster' });
+    await a.store.getState().createDocument(design);
+    await a.engine.syncNow();
+    return design;
+  }
+
+  const copies = (docs: DesignDocument[]) =>
+    docs.filter((document) => document.name.endsWith(CONFLICT_SUFFIX));
+
+  it('makes one conflict copy even when the first attempt fails part-way', async () => {
+    let failApply = true;
+    const a = await track(device(cloud, key));
+    const b = await track(
+      device(cloud, key, {
+        documents: (base) => ({
+          ...base,
+          put: (document) => {
+            if (failApply && document.name === 'A’s edit') {
+              failApply = false;
+              return Promise.reject(new Error('disk full'));
+            }
+            return base.put(document);
+          },
+        }),
+      }),
+    );
+    const design = await sharedDesign(a);
+    await b.engine.syncNow();
+    await edited(a.store, design, 'A’s edit');
+    await a.engine.syncNow();
+    await edited(b.store, design, 'B’s edit');
+
+    await b.engine.syncNow();
+    expect(b.engine.store.getState().status).toBe('error');
+    await b.engine.syncNow();
+
+    expect(b.engine.store.getState().status).toBe('synced');
+    expect(copies(b.docs()).map((document) => document.name)).toEqual([
+      `B’s edit${CONFLICT_SUFFIX}`,
+    ]);
+    expect(b.store.getState().documents[DOC_ID]?.name).toBe('A’s edit');
+  });
+
+  it('downloads the server copy’s images before making a conflict copy', async () => {
+    let failDownload = true;
+    const a = await track(device(cloud, key));
+    const b = await track(
+      device(cloud, key, {
+        remote: (base) => ({
+          ...base,
+          downloadAsset: (id) => {
+            if (failDownload) {
+              failDownload = false;
+              return Promise.reject(new Error('timeout'));
+            }
+            return base.downloadAsset(id);
+          },
+        }),
+      }),
+    );
+    const design = await sharedDesign(a);
+    await b.engine.syncNow();
+    const asset = await a.store.getState().addImage(pngFile());
+    a.store.getState().saveDocument({
+      ...design,
+      name: 'With image',
+      elements: [createImage('i1', asset, { width: 1000, height: 1000 })],
     });
-    const spy = vi.spyOn(engine, 'syncNow');
-    engine.start();
-    await vi.advanceTimersByTimeAsync(0);
-    spy.mockClear();
+    await a.store.getState().flush();
+    await a.engine.syncNow();
+    await edited(b.store, design, 'B’s edit');
 
-    remote.emitChange();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(spy).toHaveBeenCalledTimes(1);
+    await b.engine.syncNow();
+    expect(copies(b.docs())).toEqual([]);
+    await b.engine.syncNow();
+    expect(copies(b.docs())).toHaveLength(1);
+    expect(b.store.getState().assets.map((entry) => entry.id)).toEqual([
+      asset.id,
+    ]);
+  });
 
-    remote.emitStatus('connected');
-    await vi.advanceTimersByTimeAsync(0);
-    await engine.syncNow();
-    expect(engine.getStatus()).toMatchObject({ state: 'idle', live: true });
+  it('keeps an edit made while a pulled design was downloading', async () => {
+    const a = await track(device(cloud, key));
+    const hold = deferred();
+    let holding = false;
+    let downloading = false;
+    const b = await track(
+      device(cloud, key, {
+        remote: (base) => ({
+          ...base,
+          downloadAsset: async (id) => {
+            if (holding) {
+              downloading = true;
+              await hold.promise;
+            }
+            return base.downloadAsset(id);
+          },
+        }),
+      }),
+    );
+    const design = await sharedDesign(a);
+    await b.engine.syncNow();
+    const asset = await a.store.getState().addImage(pngFile());
+    a.store.getState().saveDocument({
+      ...design,
+      name: 'Remote',
+      elements: [createImage('i1', asset, { width: 1000, height: 1000 })],
+    });
+    await a.store.getState().flush();
+    await a.engine.syncNow();
 
-    remote.emitStatus('disconnected');
-    expect(engine.getStatus()).toMatchObject({ live: false });
+    holding = true;
+    const pass = b.engine.syncNow();
+    await vi.waitFor(() => {
+      expect(downloading).toBe(true);
+    });
+    await edited(b.store, design, 'Typed during download');
+    hold.release();
+    await pass;
+    await b.engine.syncNow();
+
+    const names = b
+      .docs()
+      .map((document) => document.name)
+      .sort();
+    expect(names).toEqual([
+      'Remote',
+      `Typed during download${CONFLICT_SUFFIX}`,
+    ]);
+  });
+
+  it('keeps an edit made while its push was in flight, and pushes it next', async () => {
+    const hold = deferred();
+    let holding = true;
+    let inserting = false;
+    const a = await track(
+      device(cloud, key, {
+        remote: (base) => ({
+          ...base,
+          insert: async (write) => {
+            if (holding) {
+              holding = false;
+              inserting = true;
+              await hold.promise;
+            }
+            return base.insert(write);
+          },
+        }),
+      }),
+    );
+    const design = makeDocument({ id: DOC_ID, name: 'First' });
+    await a.store.getState().createDocument(design);
+    const pass = a.engine.syncNow();
+    await vi.waitFor(() => {
+      expect(inserting).toBe(true);
+    });
+    await edited(a.store, design, 'Second');
+    hold.release();
+    await pass;
+    expect((await a.meta.getDesign(DOC_ID))?.dirty).toBe(true);
+    await a.engine.syncNow();
+    expect(cloud.rows.get(DOC_ID)?.version).toBe(2);
+    const b = await track(device(cloud, key));
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]?.name).toBe('Second');
+  });
+
+  it('tombstones a design whose insert committed but whose response was lost', async () => {
+    let loseResponse = true;
+    const a = await track(
+      device(cloud, key, {
+        remote: (base) => ({
+          ...base,
+          insert: async (write) => {
+            const saved = await base.insert(write);
+            if (loseResponse) {
+              loseResponse = false;
+              throw new Error('connection reset');
+            }
+            return saved;
+          },
+        }),
+      }),
+    );
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    expect(cloud.rows.get(DOC_ID)?.version).toBe(1);
+    await a.store.getState().removeDocument(DOC_ID);
+    await a.engine.syncNow();
+    expect(cloud.rows.get(DOC_ID)).toMatchObject({
+      deletedAt: expect.any(String),
+    });
+    await a.engine.syncNow();
+    expect(a.store.getState().documents[DOC_ID]).toBeUndefined();
+  });
+
+  it('queues designs and images stored before sync existed', async () => {
+    const asset = {
+      id: 'legacy-img',
+      name: 'old.png',
+      mimeType: 'image/png',
+      width: 1,
+      height: 1,
+      size: 1,
+      createdAt: new Date(NOW).toISOString(),
+    };
+    const a = await track(
+      device(cloud, key, {
+        seed: async ({ documents, assets }) => {
+          await documents.put(makeDocument({ id: DOC_ID, name: 'Old' }));
+          await assets.put(asset, new Blob([new Uint8Array([1])]));
+        },
+      }),
+    );
+    a.engine.start();
+    await vi.waitFor(() => {
+      expect(cloud.rows.has(DOC_ID)).toBe(true);
+      expect(cloud.assets.has(asset.id)).toBe(true);
+    });
+    expect(await a.meta.listPendingAssets()).toEqual([]);
+  });
+
+  it('logs a failed bookkeeping write and recovers the design on the next start', async () => {
+    let failing = true;
+    const lines: string[] = [];
+    const options = {
+      meta: (base: SyncMetaStore): SyncMetaStore => ({
+        ...base,
+        updateDesign: (id, change) =>
+          failing
+            ? Promise.reject(new Error('disk full'))
+            : base.updateDesign(id, change),
+      }),
+      sink: (_level: string, line: string) => {
+        lines.push(line);
+      },
+    };
+    const a = await track(device(cloud, key, options));
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    expect(cloud.rows.size).toBe(0);
+    expect(lines.some((line) => line.includes('sync.mark_failed'))).toBe(true);
+    failing = false;
+    a.engine.start();
+    await vi.waitFor(() => {
+      expect(cloud.rows.has(DOC_ID)).toBe(true);
+    });
+  });
+
+  it('stops a pass in flight on dispose and touches nothing afterwards', async () => {
+    const hold = deferred();
+    let inserting = false;
+    const a = await device(cloud, key, {
+      remote: (base) => ({
+        ...base,
+        insert: async (write) => {
+          inserting = true;
+          await hold.promise;
+          return base.insert(write);
+        },
+      }),
+    });
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    const pass = a.engine.syncNow();
+    await vi.waitFor(() => {
+      expect(inserting).toBe(true);
+    });
+    const disposing = a.engine.dispose();
+    hold.release();
+    await disposing;
+    await pass;
+    const after = cloud.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(cloud.calls.length).toBe(after);
+    expect(cloud.calls).not.toContain('fetchChangedSince');
+  });
+
+  it('waits for the backoff instead of polling after a failure', async () => {
+    const a = await track(
+      device(cloud, key, { pollIntervalMs: 10, retryBaseMs: 60_000 }),
+    );
+    cloud.failNext(1);
+    a.engine.start();
+    await vi.waitFor(() => {
+      expect(a.engine.store.getState().status).toBe('error');
+    });
+    const calls = cloud.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(cloud.calls.length).toBe(calls);
+    a.engine.retryNow();
+    await vi.waitFor(() => {
+      expect(a.engine.store.getState().status).toBe('synced');
+    });
+  });
+
+  it('ignores a pulled image whose sealed metadata is for another image', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const one = await a.store.getState().addImage(pngFile('one.png'));
+    const two = await a.store.getState().addImage(pngFile('two.png'));
+    await a.store.getState().createDocument(
+      makeDocument({
+        id: DOC_ID,
+        elements: [createImage('i1', one, { width: 1000, height: 1000 })],
+      }),
+    );
+    await a.engine.syncNow();
+    cloud.assets.set(one.id, cloud.assets.get(two.id) ?? '');
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toBeDefined();
+    expect(b.store.getState().assets).toEqual([]);
+  });
+
+  it('re-reads rows that committed late, within the rewind window', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    await sharedDesign(a);
+    await b.engine.syncNow();
+    const cursor = (await b.meta.getCursor())?.updatedAt ?? '';
+    const late = '00000000-0000-4000-8000-0000000000e1';
+    const tooLate = '00000000-0000-4000-8000-0000000000e2';
+    await a.store.getState().createDocument(makeDocument({ id: late }));
+    await a.store.getState().createDocument(makeDocument({ id: tooLate }));
+    await a.engine.syncNow();
+    const at = (offsetMs: number) =>
+      new Date(Date.parse(cursor) + offsetMs).toISOString();
+    cloud.setUpdatedAt(late, at(-2_000));
+    // Outside the 5 s overlap: the documented limit of the rewind.
+    cloud.setUpdatedAt(tooLate, at(-6_000));
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[late]).toBeDefined();
+    expect(b.store.getState().documents[tooLate]).toBeUndefined();
+  });
+
+  it('pages through rows that share one server time', async () => {
+    cloud.freezeClock();
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key, { pageSize: 2 }));
+    for (let index = 0; index < 5; index += 1) {
+      await a.store
+        .getState()
+        .createDocument(makeDocument({ id: a.createId() }));
+    }
+    await a.engine.syncNow();
+    expect(
+      new Set([...cloud.rows.values()].map((row) => row.updatedAt)).size,
+    ).toBe(1);
+    await b.engine.syncNow();
+    expect(b.docs()).toHaveLength(5);
+  });
+
+  it('makes no copy when the edits agree, or when only one side deleted', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key));
+    const design = await sharedDesign(a);
+    await b.engine.syncNow();
+
+    // Same edit on both sides.
+    await edited(a.store, design, 'Same');
+    await edited(b.store, design, 'Same');
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+    expect(copies(b.docs())).toEqual([]);
+
+    // Deleted here, edited there: the server's edit comes back, no copy.
+    await b.engine.syncNow();
+    await a.engine.syncNow();
+    const current = a.store.getState().documents[DOC_ID] ?? design;
+    await b.store.getState().removeDocument(DOC_ID);
+    await edited(a.store, current, 'Edited elsewhere');
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]?.name).toBe('Edited elsewhere');
+    expect(copies(b.docs())).toEqual([]);
+
+    // Deleted on both sides: stays deleted, no copy.
+    await b.store.getState().removeDocument(DOC_ID);
+    await a.engine.syncNow();
+    await a.store.getState().removeDocument(DOC_ID);
+    await a.engine.syncNow();
+    await b.engine.syncNow();
+    expect(b.store.getState().documents[DOC_ID]).toBeUndefined();
+    expect(copies(b.docs())).toEqual([]);
+  });
+
+  it('picks up another device’s change through polling alone', async () => {
+    const a = await track(device(cloud, key));
+    const b = await track(device(cloud, key, { pollIntervalMs: 20 }));
+    b.engine.start();
+    await vi.waitFor(() => {
+      expect(b.engine.store.getState().status).toBe('synced');
+    });
+    await a.store.getState().createDocument(makeDocument({ id: DOC_ID }));
+    await a.engine.syncNow();
+    await vi.waitFor(() => {
+      expect(b.store.getState().documents[DOC_ID]).toBeDefined();
+    });
   });
 });

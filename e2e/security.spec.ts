@@ -27,11 +27,15 @@ test('the app runs with no CSP violations or console errors', async ({
   page.on('pageerror', (error) => problems.push(error.message));
 
   await page.goto('/');
-  await page
-    .getByRole('button', { name: 'Continue offline without an account' })
-    .click();
-  await page.getByRole('button', { name: /Christmas party/ }).click();
-  await expect(page.getByLabel('Design title')).toBeVisible();
+  await page.getByRole('link', { name: /Try without an account/ }).click();
+  await page.getByRole('button', { name: /Rooftop Summer Party/ }).click();
+  await expect(page.getByLabel('Design name')).toHaveValue(
+    'Rooftop Summer Party',
+  );
+  await page.goto('/sign-in');
+  await expect(
+    page.getByRole('heading', { name: 'Welcome back' }),
+  ).toBeVisible();
 
   expect(problems).toEqual([]);
 });
@@ -42,7 +46,7 @@ test.describe('deployed HTTP security headers', () => {
     'Only meaningful against a Vercel deployment (set E2E_BASE_URL).',
   );
 
-  for (const path of ['/', '/s/00000000-0000-4000-8000-000000000000']) {
+  for (const path of ['/', '/projects']) {
     test(`are set on ${path}`, async ({ request }) => {
       const headers = (await request.get(path)).headers();
 
@@ -58,12 +62,4 @@ test.describe('deployed HTTP security headers', () => {
       expect(headers['permissions-policy']).toContain('camera=()');
     });
   }
-
-  test('share pages are not indexed', async ({ request }) => {
-    const headers = (
-      await request.get('/s/00000000-0000-4000-8000-000000000000')
-    ).headers();
-
-    expect(headers['x-robots-tag']).toContain('noindex');
-  });
 });

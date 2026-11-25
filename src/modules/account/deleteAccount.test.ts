@@ -1,120 +1,169 @@
 import {
+  deleteAccount,
   INCOMPLETE_MESSAGE,
   OFFLINE_MESSAGE,
-  deleteAccount,
-  type DeleteAccountDeps,
+  type DeleteAccountDependencies,
 } from '@/modules/account/deleteAccount';
+import { createSupabaseCloudFiles } from '@/modules/account/infrastructure/supabaseCloudFiles';
+import { AuthError, type Session } from '@/modules/auth/domain/authModel';
 import { createLogger } from '@/shared/logger';
+import { createFakeSupabase } from '@/test/fakeSupabase';
+import { NOW } from '@/test/factories';
 
-function setup(overrides: Partial<DeleteAccountDeps> = {}) {
-  const calls: string[] = [];
-  const lines: string[] = [];
-  const deps: DeleteAccountDeps = {
+const session: Session = {
+  userId: 'u1',
+  email: 'ann@example.test',
+  displayName: 'Ann',
+  provider: 'supabase',
+  expiresAt: NOW + 1000,
+};
+
+function setup(overrides: Partial<DeleteAccountDependencies> = {}) {
+  const order: string[] = [];
+  const step = (name: string) =>
+    vi.fn(() => {
+      order.push(name);
+      return Promise.resolve();
+    });
+  const deps: DeleteAccountDependencies = {
     auth: {
-      verifyPassword: vi.fn(() => {
-        calls.push('verify');
-        return Promise.resolve({
-          ok: true as const,
-          user: { id: 'u1', email: 'a@b.co' },
-        });
-      }),
-      deleteAccount: vi.fn(() => {
-        calls.push('account');
-        return Promise.resolve();
-      }),
+      verifyPassword: step('verify'),
+      deleteIdentity: step('identity'),
     },
-    remote: {
-      deleteAllFiles: vi.fn(() => {
-        calls.push('files');
+    cloudFiles: {
+      deleteAll: vi.fn(() => {
+        order.push('files');
         return Promise.resolve(3);
       }),
     },
-    deleteLocalData: vi.fn(() => {
-      calls.push('local');
-      return Promise.resolve();
-    }),
+    closeWorkspace: step('close'),
+    deleteLocalData: step('local'),
     isOnline: () => true,
-    logger: createLogger({
-      service: 't',
-      sink: (_l, line) => lines.push(line),
-    }),
+    logger: createLogger({ service: 'test', sink: () => undefined }),
     ...overrides,
   };
-  return { deps, calls, lines };
+  return { deps, order };
 }
 
-describe('deleteAccount', () => {
-  it('verifies, deletes files, then the account, then local data', async () => {
-    const { deps, calls } = setup();
-
-    await expect(deleteAccount(deps, 'pw')).resolves.toEqual({
+describe('delete account', () => {
+  it('verifies, stops sync, deletes files, the account, then this device’s data', async () => {
+    const { deps, order } = setup();
+    expect(await deleteAccount(deps, { session, password: 'pw' })).toEqual({
       ok: true,
       localDataRemains: false,
     });
-    expect(deps.auth.verifyPassword).toHaveBeenCalledWith('pw');
-    expect(calls).toEqual(['verify', 'files', 'account', 'local']);
+    expect(order).toEqual(['verify', 'close', 'files', 'identity', 'local']);
   });
 
-  it('refuses offline without touching anything', async () => {
-    const { deps, calls } = setup({ isOnline: () => false });
-
-    await expect(deleteAccount(deps, 'pw')).resolves.toEqual({
+  it('changes nothing when offline or the password is wrong', async () => {
+    const offline = setup({ isOnline: () => false });
+    expect(
+      await deleteAccount(offline.deps, { session, password: 'pw' }),
+    ).toEqual({
       ok: false,
       message: OFFLINE_MESSAGE,
+      workspaceClosed: false,
     });
-    expect(calls).toEqual([]);
-  });
-
-  it('stops on a wrong password', async () => {
-    const { deps, calls } = setup();
-    vi.mocked(deps.auth.verifyPassword).mockResolvedValueOnce({
-      ok: false,
-      message: 'Email or password is incorrect.',
-    });
-
-    await expect(deleteAccount(deps, 'bad')).resolves.toEqual({
-      ok: false,
-      message: 'Email or password is incorrect.',
-    });
-    expect(calls).toEqual([]);
-  });
-
-  it('keeps the account when file deletion fails', async () => {
-    const { deps, lines } = setup();
-    vi.mocked(deps.remote.deleteAllFiles).mockRejectedValueOnce(
-      new Error('storage down'),
+    const wrong = setup();
+    vi.mocked(wrong.deps.auth.verifyPassword).mockRejectedValueOnce(
+      new AuthError('invalid-credentials'),
     );
+    expect(
+      await deleteAccount(wrong.deps, { session, password: 'x' }),
+    ).toMatchObject({
+      ok: false,
+      message: 'Email or password is incorrect.',
+      workspaceClosed: false,
+    });
+    vi.mocked(wrong.deps.auth.verifyPassword).mockRejectedValueOnce(
+      new Error('?'),
+    );
+    expect(
+      await deleteAccount(wrong.deps, { session, password: 'x' }),
+    ).toMatchObject({
+      ok: false,
+      workspaceClosed: false,
+    });
+    expect(wrong.order).toEqual([]);
+  });
 
-    await expect(deleteAccount(deps, 'pw')).resolves.toEqual({
+  it('works offline for device-local accounts (nothing in the cloud)', async () => {
+    const { deps, order } = setup({ cloudFiles: null, isOnline: () => false });
+    expect((await deleteAccount(deps, { session, password: 'pw' })).ok).toBe(
+      true,
+    );
+    expect(order).toEqual(['verify', 'close', 'identity', 'local']);
+  });
+
+  it('reports a half-finished delete so the app signs out and the user can retry', async () => {
+    const { deps } = setup();
+    vi.mocked(deps.auth.deleteIdentity).mockRejectedValueOnce(new Error('rpc'));
+    expect(await deleteAccount(deps, { session, password: 'pw' })).toEqual({
       ok: false,
       message: INCOMPLETE_MESSAGE,
+      workspaceClosed: true,
     });
-    expect(deps.auth.deleteAccount).not.toHaveBeenCalled();
-    expect(deps.deleteLocalData).not.toHaveBeenCalled();
-    expect(lines.join()).toContain('account.delete_failed');
   });
 
-  it('keeps local data when the server refuses the deletion', async () => {
-    const { deps } = setup();
-    vi.mocked(deps.auth.deleteAccount).mockRejectedValueOnce(
-      new Error('storage_not_empty'),
-    );
-
-    await expect(deleteAccount(deps, 'pw')).resolves.toMatchObject({
-      ok: false,
-    });
-    expect(deps.deleteLocalData).not.toHaveBeenCalled();
-  });
-
-  it('reports leftover local data after the account is gone', async () => {
-    const { deps, lines } = setup({
+  it('still succeeds when only the local copy couldn’t be removed', async () => {
+    const { deps } = setup({
       deleteLocalData: () => Promise.reject(new Error('blocked')),
     });
-
-    await expect(deleteAccount(deps, 'pw')).resolves.toEqual({
+    expect(await deleteAccount(deps, { session, password: 'pw' })).toEqual({
       ok: true,
       localDataRemains: true,
     });
-    expect(lines.join()).toContain('account.local_delete_failed');
+  });
+});
+
+describe('Supabase cloud files', () => {
+  it('empties every user folder and every share image', async () => {
+    const fake = createFakeSupabase();
+    fake.bucket.list
+      .mockResolvedValueOnce({
+        data: [{ name: 'a1' }, { name: 'a2' }],
+        error: null,
+      })
+      .mockResolvedValueOnce({ data: [], error: null })
+      .mockResolvedValueOnce({ data: [], error: null });
+    fake.respond({ data: [{ id: 's1' }] }, { data: [] });
+    const files = createSupabaseCloudFiles(fake.client, 'u1');
+    expect(await files.deleteAll()).toBe(3);
+    expect(fake.bucket.remove).toHaveBeenCalledWith(['u1/a1', 'u1/a2']);
+    expect(fake.bucket.remove).toHaveBeenCalledWith(['s1.png']);
+    expect(fake.raw.storage.from).toHaveBeenCalledWith('workspace-assets');
+    expect(fake.raw.storage.from).toHaveBeenCalledWith('design-assets');
+  });
+
+  it('stops with context on any failure', async () => {
+    const fake = createFakeSupabase();
+    const files = createSupabaseCloudFiles(fake.client, 'u1');
+    fake.bucket.list.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'x' },
+    });
+    await expect(files.deleteAll()).rejects.toThrow(
+      'list workspace-assets failed',
+    );
+
+    fake.bucket.list.mockResolvedValueOnce({
+      data: [{ name: 'a' }],
+      error: null,
+    });
+    fake.bucket.remove.mockResolvedValueOnce({ error: { message: 'y' } });
+    await expect(files.deleteAll()).rejects.toThrow(
+      'delete workspace-assets failed',
+    );
+
+    fake.respond({ error: { message: 'z' } });
+    await expect(files.deleteAll()).rejects.toThrow(
+      'list workspace_shares failed',
+    );
+
+    fake.respond({ data: [{ id: 's1' }] });
+    fake.bucket.remove.mockResolvedValueOnce({ error: { message: 'w' } });
+    await expect(files.deleteAll()).rejects.toThrow(
+      'delete workspace-shares failed',
+    );
   });
 });

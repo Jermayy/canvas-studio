@@ -1,23 +1,24 @@
-import '@/styles.css';
-import { ErrorBoundary } from '@/app/components/ErrorBoundary';
+import '@/styles/tokens.css';
+import '@/styles/base.css';
+import '@/styles/components.css';
+import '@/styles/pages.css';
+import '@/styles/studio.css';
+import { App } from '@/app/App';
+import { composeBrowserServices } from '@/app/composeServices';
 import { parseConfig } from '@/app/config';
-import { createSupabase } from '@/modules/auth/supabaseClient';
 import {
-  browserFileEnv,
-  createBrowserFileDelivery,
-} from '@/modules/export/fileDelivery';
-import { isSharePath } from '@/modules/share/domain/shareLink';
+  configureTextMeasure,
+  cssFont,
+} from '@/modules/document/domain/textLayout';
 import { createLogger } from '@/shared/logger';
-import { StrictMode, type ReactNode } from 'react';
+import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
+const version = import.meta.env.VITE_APP_VERSION;
 const logger = createLogger({
   service: 'canvas-studio-web',
   minLevel: import.meta.env.DEV ? 'debug' : 'info',
-  baseContext: {
-    env: import.meta.env.MODE,
-    version: import.meta.env.VITE_APP_VERSION,
-  },
+  baseContext: { env: import.meta.env.MODE, version },
 });
 
 window.addEventListener('error', (event) => {
@@ -33,52 +34,34 @@ if (!rootElement) {
 }
 const root = createRoot(rootElement);
 
-function renderApp(content: ReactNode): void {
+// Real glyph metrics for text wrapping (the domain falls back to an estimate).
+const measureContext = document.createElement('canvas').getContext('2d');
+if (measureContext) {
+  configureTextMeasure((text, font) => {
+    measureContext.font = cssFont(font);
+    return (
+      measureContext.measureText(text).width + text.length * font.letterSpacing
+    );
+  });
+}
+
+async function start(): Promise<void> {
+  // Fails fast on a half-configured or unsafe build (playbook 02).
+  const config = parseConfig(import.meta.env);
+  const services = await composeBrowserServices({ config, logger, version });
   root.render(
     <StrictMode>
-      <ErrorBoundary logger={logger}>{content}</ErrorBoundary>
+      <App services={services} />
     </StrictMode>,
   );
 }
 
-function renderFatal(error: unknown): void {
-  logger.error('app.startup_failed', { error: String(error) });
+start().catch((error: unknown) => {
+  logger.error('app.startup_failed', { error });
   root.render(
-    <div className="fatal-screen" role="alert">
-      <h1>Canvas Studio can't start</h1>
+    <div className="error-screen" role="alert">
+      <h1>Canvas Studio can’t start</h1>
       <p>{error instanceof Error ? error.message : String(error)}</p>
     </div>,
   );
-}
-
-/**
- * Validates config, then loads only the code for this URL: the public
- * share page or the editor app, each its own chunk.
- */
-async function start(): Promise<void> {
-  // Fails fast on a half-configured or unsafe build.
-  const config = parseConfig(import.meta.env);
-  const supabase = config.supabase
-    ? createSupabase(config.supabase, window.localStorage)
-    : null;
-  const files = createBrowserFileDelivery(browserFileEnv());
-  const { pathname } = window.location;
-
-  if (isSharePath(pathname)) {
-    const { SharedDesignRoot } =
-      await import('@/modules/share/components/SharedDesignRoot');
-    renderApp(
-      <SharedDesignRoot
-        pathname={pathname}
-        supabase={supabase}
-        logger={logger}
-        files={files}
-      />,
-    );
-    return;
-  }
-  const { EditorRoot } = await import('@/app/EditorRoot');
-  renderApp(<EditorRoot supabase={supabase} logger={logger} files={files} />);
-}
-
-start().catch(renderFatal);
+});

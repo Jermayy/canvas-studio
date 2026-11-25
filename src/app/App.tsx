@@ -1,278 +1,397 @@
+import { FullScreenLoader, Redirect } from '@/app/components/AppChrome';
+import { ErrorBoundary } from '@/app/components/ErrorBoundary';
+import { NotFoundPage } from '@/app/components/NotFoundPage';
+import { navigate, parseRoute, useLocation, type Route } from '@/app/router';
 import {
   ServicesContext,
+  SessionContext,
   WorkspaceContext,
   type AppServices,
-} from '@/app/services';
-import {
-  browserConnectivity,
-  createWorkspace,
   type Workspace,
-  type WorkspaceSession,
-} from '@/app/workspace';
-import { DeleteAccountDialog } from '@/modules/account/components/DeleteAccountDialog';
+} from '@/app/services';
+import type { DeleteAccountResult } from '@/modules/account/deleteAccount';
+import type { AuthSuccess } from '@/modules/auth/application/authService';
+import type { StoredSession } from '@/modules/auth/application/ports';
+import { RecoveryCodeDialog } from '@/modules/auth/components/RecoveryCode';
+import { ResetPasswordPage } from '@/modules/auth/components/ResetPasswordPage';
+import { AuthPage } from '@/modules/auth/components/AuthPage';
+import { LandingPage } from '@/modules/landing/LandingPage';
+import { applyPreferences } from '@/modules/preferences/preferences';
+import { Toaster } from '@/shared/ui/Toaster';
+import { ElsewherePage } from '@/app/components/ElsewherePage';
 import {
-  deleteAccount,
-  type DeleteAccountResult,
-} from '@/modules/account/deleteAccount';
-import type { AuthService, AuthUser } from '@/modules/auth/authService';
-import { AuthScreen } from '@/modules/auth/components/AuthScreen';
-import { HomeScreen } from '@/modules/designs/components/HomeScreen';
-import {
-  deleteWorkspaceDb,
-  type DesignRecord,
-} from '@/modules/designs/data/localDb';
-import { EditorScreen } from '@/modules/editor/components/EditorScreen';
-import { editorStore } from '@/modules/editor/state/editorStore';
-import type { ShareStore } from '@/modules/share/shareStore';
-import type { RemoteDesignStore } from '@/modules/sync/remoteDesignStore';
-import { useCallback, useEffect, useRef, useState } from 'react';
+  lazy,
+  Suspense,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react';
+import { useStore } from 'zustand';
 
-export interface AppProps {
-  services: AppServices;
-  auth: AuthService | null;
-  createRemote: (user: AuthUser) => RemoteDesignStore;
-  /** Share links for signed-in users; omitted when unavailable. */
-  createShares?: (user: AuthUser) => ShareStore;
-  /** Lets tests inject an isolated environment. */
-  workspaceFactory?: typeof createWorkspace;
-}
+// Route-level code splitting: the editor (and jsPDF behind it) only loads
+// when someone opens a design.
+const DashboardPage = lazy(() => import('@/modules/dashboard/DashboardPage'));
+const StudioRoute = lazy(() => import('@/modules/studio/StudioRoute'));
+const SandboxRoute = lazy(() => import('@/modules/studio/SandboxRoute'));
+const SharedDesignPage = lazy(() => import('@/modules/share/SharedDesignPage'));
 
-type Screen = 'loading' | 'auth' | 'home' | 'editor';
+type AuthState =
+  | { status: 'restoring' }
+  | { status: 'signed-out' }
+  | { status: 'signed-in'; stored: StoredSession; workspace: Workspace }
+  /** Signed in, but another tab holds the workspace (one active tab). */
+  | { status: 'elsewhere'; stored: StoredSession };
 
-/** Remembers that the user chose offline mode (not a credential). */
-const MODE_KEY = 'canvas-studio.mode';
-
-function readGuestPreference(): boolean {
-  try {
-    return localStorage.getItem(MODE_KEY) === 'guest';
-  } catch {
-    return false;
-  }
-}
-
-function writeGuestPreference(guest: boolean): void {
-  try {
-    if (guest) {
-      localStorage.setItem(MODE_KEY, 'guest');
-    } else {
-      localStorage.removeItem(MODE_KEY);
-    }
-  } catch {
-    // Storage unavailable: the user just sees the sign-in screen next time.
-  }
-}
-
-export function App({
-  services,
-  auth,
-  createRemote,
-  createShares,
-  workspaceFactory = createWorkspace,
-}: AppProps) {
-  const [screen, setScreen] = useState<Screen>('loading');
-  const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [authNotice, setAuthNotice] = useState<string | null>(null);
-  const [deletingAccount, setDeletingAccount] = useState(false);
-  // The live workspace, so it can be disposed exactly once on switch.
-  const workspaceRef = useRef<Workspace | null>(null);
-
-  /** One workspace per session; disposing closes its database and sync. */
-  const activate = useCallback(
-    (session: WorkspaceSession | null) => {
-      workspaceRef.current?.dispose();
-      const next = session
-        ? workspaceFactory(session, {
-            logger: services.logger,
-            ...browserConnectivity,
-          })
-        : null;
-      workspaceRef.current = next;
-      setWorkspace(next);
-    },
-    [services.logger, workspaceFactory],
+/** Keeps preferences applied to <html> (theme, accent, density, scale). */
+function PreferencesEffect({ services }: { services: AppServices }) {
+  const preferences = useStore(
+    services.preferences,
+    (state) => state.preferences,
   );
-
-  useEffect(
-    () => () => {
-      workspaceRef.current?.dispose();
-      workspaceRef.current = null;
-    },
-    [],
-  );
-
-  const startCloud = useCallback(
-    (user: AuthUser) => {
-      writeGuestPreference(false);
-      activate({
-        kind: 'cloud',
-        user,
-        remote: createRemote(user),
-        ...(createShares ? { shares: createShares(user) } : {}),
-      });
-      setScreen('home');
-    },
-    [activate, createRemote, createShares],
-  );
-
-  const startGuest = useCallback(() => {
-    writeGuestPreference(true);
-    activate({ kind: 'guest' });
-    setScreen('home');
-  }, [activate]);
-
-  // Restore the previous session (works offline from the encrypted store).
   useEffect(() => {
-    let cancelled = false;
-    const restore = async () => {
-      const user = auth ? await auth.currentUser() : null;
-      if (cancelled) {
-        return;
-      }
-      if (user) {
-        startCloud(user);
-      } else if (readGuestPreference()) {
-        startGuest();
-      } else {
-        setScreen('auth');
+    applyPreferences(document.documentElement, preferences);
+  }, [preferences]);
+  return null;
+}
+
+/**
+ * Pending saves are written when the tab is hidden or the page unloads.
+ * Those are the events browsers reliably deliver (beforeunload alone
+ * loses writes, playbook 06); beforeunload only asks to confirm leaving
+ * while a save is still pending.
+ */
+function useFlushOnHide(workspace: Workspace | null) {
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+    const flush = () => {
+      void workspace.store.getState().flush();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        flush();
       }
     };
-    void restore();
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      const saves = Object.values(workspace.store.getState().saves);
+      if (saves.some((save) => save.status !== 'saved')) {
+        flush();
+        event.preventDefault();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', flush);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
+  }, [workspace]);
+}
+
+function routeNeedsAccount(
+  route: Route,
+): route is Extract<Route, { name: 'projects' | 'studio' }> {
+  return route.name === 'projects' || route.name === 'studio';
+}
+
+function Routes({
+  route,
+  auth,
+  onAuthenticated,
+  onUseHere,
+}: {
+  route: Route;
+  auth: AuthState;
+  onAuthenticated: (success: AuthSuccess, next: string) => void;
+  onUseHere: () => Promise<void>;
+}) {
+  const location = useLocation();
+  const signedIn = auth.status === 'signed-in' || auth.status === 'elsewhere';
+  switch (route.name) {
+    case 'landing':
+      return <LandingPage signedIn={signedIn} />;
+    case 'sign-in':
+    case 'sign-up':
+      if (signedIn) {
+        return <Redirect to={route.next} />;
+      }
+      return (
+        <AuthPage
+          // Keyed by mode: switching sign-up ↔ sign-in starts a fresh form
+          // (otherwise "Check your inbox" outlives the link to sign in).
+          key={route.name}
+          mode={route.name}
+          next={route.next}
+          onAuthenticated={(success) => {
+            onAuthenticated(success, route.next);
+          }}
+        />
+      );
+    case 'reset-password':
+      // A reset link (with a code) opens the reset form even when signed
+      // in; the current session is replaced only once the reset succeeds,
+      // so a bad or foreign link changes nothing.
+      if (signedIn && !route.code) {
+        return <Redirect to="/projects" />;
+      }
+      return (
+        <ResetPasswordPage
+          email={route.email}
+          code={route.code}
+          onAuthenticated={(success) => {
+            onAuthenticated(success, '/projects');
+          }}
+        />
+      );
+    case 'sandbox':
+      return <SandboxRoute />;
+    case 'shared':
+      return <SharedDesignPage token={route.token} />;
+    case 'not-found':
+      return <NotFoundPage />;
+    case 'projects':
+    case 'studio':
+      break;
+  }
+  if (!routeNeedsAccount(route)) {
+    return null;
+  }
+  if (auth.status === 'restoring') {
+    return <FullScreenLoader label="Unlocking your workspace…" />;
+  }
+  if (auth.status === 'signed-out') {
+    const next = encodeURIComponent(location.pathname + location.search);
+    return <Redirect to={`/sign-in?next=${next}`} />;
+  }
+  if (auth.status === 'elsewhere') {
+    return <ElsewherePage onUseHere={onUseHere} />;
+  }
+  return (
+    <WorkspaceContext value={auth.workspace}>
+      {route.name === 'projects' ? (
+        <DashboardPage search={route.search} />
+      ) : (
+        <StudioRoute key={route.documentId} documentId={route.documentId} />
+      )}
+    </WorkspaceContext>
+  );
+}
+
+export function App({ services }: { services: AppServices }) {
+  const location = useLocation();
+  const route = parseRoute(location.pathname, location.search);
+  const [auth, setAuth] = useState<AuthState>({ status: 'restoring' });
+  // Shown once, right after the keyring issues a code.
+  const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
+  const workspace = auth.status === 'signed-in' ? auth.workspace : null;
+  const stored =
+    auth.status === 'signed-in' || auth.status === 'elsewhere'
+      ? auth.stored
+      : null;
+  // The open workspace and its lease, for callbacks that outlive a render.
+  const active = useRef<{ workspace: Workspace; release: () => void } | null>(
+    null,
+  );
+
+  useFlushOnHide(workspace);
+
+  /** Saves and closes the open workspace and gives up its lease. */
+  const closeActive = async () => {
+    const current = active.current;
+    active.current = null;
+    if (!current) {
+      return;
+    }
+    try {
+      await current.workspace.close();
+    } finally {
+      current.release();
+    }
+  };
+
+  // Plain function: it only uses the ref, setAuth and services (all stable).
+  const handedOver = async () => {
+    // Another tab pressed "Use here". Pending edits are saved first.
+    const current = active.current;
+    active.current = null;
+    await current?.workspace.close();
+    setAuth((previous) =>
+      previous.status === 'signed-in'
+        ? { status: 'elsewhere', stored: previous.stored }
+        : previous,
+    );
+    services.toasts
+      .getState()
+      .notify('Canvas Studio is now open in another tab.', { tone: 'info' });
+  };
+
+  /** Opens the account's workspace if no other tab holds it. */
+  const activate = async (next: StoredSession, steal = false) => {
+    const lease = await services.leases.acquire(next.session.userId, {
+      steal,
+      onLost: () => {
+        void handedOver();
+      },
+    });
+    if (lease.kind === 'busy') {
+      setAuth({ status: 'elsewhere', stored: next });
+      return;
+    }
+    const opened = services.openWorkspace(next);
+    active.current = { workspace: opened, release: lease.release };
+    void opened.store.getState().load();
+    setAuth({ status: 'signed-in', stored: next, workspace: opened });
+  };
+
+  const restored = useEffectEvent((next: StoredSession | null) => {
+    if (next) {
+      void activate(next);
+    } else {
+      setAuth({ status: 'signed-out' });
+    }
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    void services.auth.restore().then((next) => {
+      if (!cancelled) {
+        restored(next);
+      }
+    });
     return () => {
       cancelled = true;
     };
-  }, [auth, startCloud, startGuest]);
+  }, [services]);
 
-  // Sessions revoked elsewhere (e.g. password change) return to sign-in.
-  useEffect(() => {
-    if (!auth) {
-      return undefined;
+  const signOut = async (reason?: string) => {
+    if (!stored) {
+      return;
     }
-    return auth.onSignedOut(() => {
-      if (workspaceRef.current?.kind !== 'cloud') {
-        return;
-      }
-      editorStore.getState().close();
-      activate(null);
-      setScreen('auth');
-    });
-  }, [auth, activate]);
-
-  const signOut = async () => {
-    editorStore.getState().close();
-    if (workspaceRef.current?.kind === 'cloud' && auth) {
-      await auth.signOut();
-    }
-    writeGuestPreference(false);
-    activate(null);
-    setScreen('auth');
+    await closeActive();
+    await services.auth.signOut();
+    setAuth({ status: 'signed-out' });
+    navigate('/', { replace: true });
+    services.toasts
+      .getState()
+      .notify(
+        reason ??
+          'You’re signed out. Your designs stay encrypted on this device.',
+        {
+          tone: reason ? 'warning' : 'success',
+        },
+      );
   };
 
-  const confirmDeleteAccount = async (
+  const deleteAccount = async (
     password: string,
   ): Promise<DeleteAccountResult> => {
-    const current = workspaceRef.current;
-    if (!auth || current?.kind !== 'cloud' || !current.remote) {
-      return { ok: false, message: 'Sign in to delete your account.' };
+    const current = active.current;
+    if (auth.status !== 'signed-in' || !current) {
+      return {
+        ok: false,
+        message: 'You’re not signed in.',
+        workspaceClosed: false,
+      };
     }
-    const workspaceId = current.id;
-    const result = await deleteAccount(
-      {
-        auth,
-        remote: current.remote,
-        isOnline: browserConnectivity.isOnline,
-        logger: services.logger,
-        deleteLocalData: async () => {
-          // Close the database before deleting it.
-          activate(null);
-          await deleteWorkspaceDb(workspaceId);
-        },
-      },
-      password,
-    );
-    if (result.ok) {
-      editorStore.getState().close();
-      writeGuestPreference(false);
-      activate(null);
-      setDeletingAccount(false);
-      setAuthNotice(
-        result.localDataRemains
-          ? 'Your account was deleted. Some data may remain in this browser; clear site data to remove it.'
-          : 'Your account and all its data have been deleted.',
+    let result: DeleteAccountResult;
+    try {
+      result = await services.deleteAccount({
+        session: auth.stored.session,
+        password,
+        workspace: current.workspace,
+      });
+    } catch (error) {
+      services.logger.error('account.delete_crashed', { error });
+      result = {
+        ok: false,
+        message: 'Your account wasn’t fully deleted. Sign in and try again.',
+        workspaceClosed: true,
+      };
+    }
+    if (!result.ok && !result.workspaceClosed) {
+      return result;
+    }
+    active.current = null;
+    current.release();
+    if (!result.ok) {
+      // Half-finished: the workspace is closed, so sign out and say why.
+      await services.auth.signOut().catch(() => undefined);
+    }
+    setAuth({ status: 'signed-out' });
+    navigate('/', { replace: true });
+    services.toasts
+      .getState()
+      .notify(
+        result.ok
+          ? 'Your account and all its designs were deleted.'
+          : result.message,
+        { tone: result.ok ? 'success' : 'warning', durationMs: 10_000 },
       );
-      setScreen('auth');
-    }
     return result;
   };
 
-  const openDesign = (record: DesignRecord) => {
-    editorStore.getState().open(record);
-    setScreen('editor');
-  };
-
-  const closeEditor = useCallback(() => {
-    const pending = editorStore.getState().notice;
-    if (pending) {
-      setNotice(pending);
+  // Sessions end on time even if the tab stays open.
+  const expiresAt = stored ? stored.session.expiresAt : null;
+  const onExpired = useEffectEvent(() => {
+    void signOut('Your session expired. Sign in again to continue.');
+  });
+  useEffect(() => {
+    if (expiresAt === null) {
+      return;
     }
-    editorStore.getState().close();
-    setScreen('home');
-  }, []);
+    const timer = setTimeout(
+      onExpired,
+      Math.min(Math.max(0, expiresAt - services.now()), 2_147_483_647),
+    );
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [expiresAt, services]);
 
   return (
-    <ServicesContext.Provider value={services}>
-      {screen === 'loading' && (
-        <div className="loading-screen" role="status">
-          Loading…
-        </div>
-      )}
-      {screen === 'auth' && (
-        <AuthScreen
-          auth={auth}
-          onSignedIn={(user) => {
-            setAuthNotice(null);
-            startCloud(user);
-          }}
-          onContinueOffline={() => {
-            setAuthNotice(null);
-            startGuest();
-          }}
-          notice={authNotice}
-        />
-      )}
-      {workspace && (screen === 'home' || screen === 'editor') && (
-        <WorkspaceContext.Provider value={workspace}>
-          {screen === 'home' && (
-            <HomeScreen
-              onOpen={openDesign}
-              onSignOut={() => {
-                void signOut();
+    <ServicesContext value={services}>
+      <PreferencesEffect services={services} />
+      <SessionContext
+        value={{
+          session: stored ? stored.session : null,
+          signOut: () => signOut(),
+          deleteAccount,
+        }}
+      >
+        <ErrorBoundary logger={services.logger}>
+          <Suspense fallback={<FullScreenLoader label="Loading…" />}>
+            <Routes
+              route={route}
+              auth={auth}
+              onAuthenticated={(success, next) => {
+                // A reset from a link while signed in replaces the session.
+                void closeActive().then(() => activate(success.stored));
+                setRecoveryCode(success.recoveryCode);
+                navigate(next, { replace: true });
               }}
-              onDeleteAccount={
-                auth
-                  ? () => {
-                      setDeletingAccount(true);
-                    }
-                  : undefined
-              }
-              notice={notice}
-              onDismissNotice={() => {
-                setNotice(null);
+              onUseHere={() => {
+                if (auth.status !== 'elsewhere') {
+                  return Promise.resolve();
+                }
+                return activate(auth.stored, true);
               }}
             />
-          )}
-          {screen === 'editor' && <EditorScreen onClose={closeEditor} />}
-        </WorkspaceContext.Provider>
-      )}
-      {deletingAccount && workspace?.email && (
-        <DeleteAccountDialog
-          email={workspace.email}
-          onCancel={() => {
-            setDeletingAccount(false);
+          </Suspense>
+        </ErrorBoundary>
+      </SessionContext>
+      {recoveryCode && (
+        <RecoveryCodeDialog
+          code={recoveryCode}
+          onDone={() => {
+            setRecoveryCode(null);
           }}
-          onConfirm={confirmDeleteAccount}
         />
       )}
-    </ServicesContext.Provider>
+      <Toaster store={services.toasts} />
+    </ServicesContext>
   );
 }

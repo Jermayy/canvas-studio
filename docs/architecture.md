@@ -1,72 +1,109 @@
-# Architecture
+# Architecture (v2 hybrid)
+
+v1's architecture (Konva canvas, plaintext Supabase sync) is in git history and ADRs 0001–0008. The hybrid v2 is described below; the decisions behind it are ADR 0009 (renderer), ADR 0010 (accounts, encryption), ADR 0011 (recovery codes) and ADR 0012 (encrypted cloud sync, server-held wrapped keys, share links).
 
 ## Containers
 
 ```mermaid
 flowchart LR
-  subgraph Browser["Browser tab (per device)"]
-    UI["React SPA<br/>editor · library · home · auth"]
-    FD["FileDelivery<br/>download · Web Share API"]
-    IDB[("IndexedDB<br/>one DB per user")]
-    LS[("localStorage<br/>Supabase session (ADR 0006)")]
-    UI --> FD
-    UI --> IDB
+  subgraph Browser["Browser tab"]
+    UI["React SPA<br/>landing · auth · dashboard · studio · sandbox"]
+    AUTH["AuthService<br/>local PBKDF2 or Supabase Auth"]
+    WS["Workspace store<br/>optimistic cache + write-behind"]
+    SYNC["SyncEngine<br/>seal/open · versions · conflicts · cursor"]
+    EXP["Export pipeline<br/>SVG → canvas → PNG/JPEG/PDF"]
+    ACC[("IndexedDB: accounts<br/>verifiers · wrapped keys · session")]
+    W[("IndexedDB: workspace per user<br/>AES-GCM sealed records")]
+    LS[("localStorage<br/>preferences · throttle")]
+    UI --> AUTH --> ACC
+    UI --> WS --> W
+    WS -- "after each save" --> SYNC
+    UI --> EXP
     UI --> LS
   end
   subgraph Vercel
-    CDN["Static hosting<br/>security headers · SPA rewrites"]
+    CDN["Static hosting<br/>CSP · security headers · SPA rewrites"]
   end
-  subgraph Supabase["Supabase (ap-southeast-2, Sydney)"]
-    AUTH["Auth"]
-    PG[("Postgres<br/>designs · design_shares + RLS")]
+  subgraph Supabase["Supabase (optional, Sydney)"]
+    SBA["Auth"]
+    KEYS[("workspace_keys<br/>wrapped data keys")]
+    DES[("workspace_designs<br/>ciphertext + versions · RLS")]
     RT["Realtime"]
-    ST[("Storage<br/>design-assets (private)<br/>design-shares (public, by token)")]
+    ASSETS[("workspace-assets<br/>sealed images (private)")]
+    SH[("workspace_shares + workspace-shares<br/>published name + PNG")]
   end
-  V["Anyone with a share link<br/>/s/&lt;token&gt;"]
-  V -- "rpc get_shared_design" --> PG
-  V -- "GET &lt;token&gt;.png" --> ST
+  V["Anyone with a link<br/>/s/&lt;token&gt;"]
   CDN -- "HTML/JS/CSS" --> UI
-  UI -- "HTTPS (15s timeout)" --> AUTH
-  UI -- "HTTPS" --> PG
-  UI -- "WSS" --> RT
-  UI -- "HTTPS" --> ST
-  PG -. "change events" .-> RT
+  AUTH -. "only when configured" .-> SBA
+  AUTH -- "wrapped key" --> KEYS
+  SYNC -- "ciphertext only" --> DES
+  SYNC -- "sealed envelopes" --> ASSETS
+  DES -. "change events" .-> RT -.-> SYNC
+  UI -- "publish link" --> SH
+  V -- "get_workspace_share(token)" --> SH
 ```
+
+## Module layout
+
+```
+src/
+  main.tsx              wiring: logger, text metrics, config, services
+  app/                  App shell, router, service container, composition root
+  shared/               logger, crypto (AES-GCM), lib (ids, time, file names, storage), ui (design system)
+  modules/
+    document/domain     schema (zod), geometry, operations, history, snapping, text layout, layers, project query
+    library/            templates, presets, icon catalog, template picker
+    render/             DesignSvg + shape geometry + SVG serialiser
+    workspace/          storage ports, encrypted IndexedDB + memory stores, optimistic cache, upload rules
+    auth/               domain (credentials, throttle), application (AuthService + ports), infrastructure, AuthPage
+    sync/               SyncEngine, sealed envelopes, bookkeeping (Dexie), Supabase adapter, cross-tab lock, status chip
+    export/             options, pipeline, browser encoders, file delivery, dialog
+    share/              share links (port, Supabase store, card, public page), email drafts, share dialog
+    account/            account deletion use case, Supabase file cleanup
+    preferences/        theme/accent/density/scale/editor settings
+    dashboard/          projects page, filters, cards
+    studio/             editor store, gestures, shortcuts, commands, panels, canvas
+    landing/
+```
+
+Dependencies point inward: `domain` folders import only other domain code and zod; adapters implement ports from `application`/`data`; components reach services through context hooks, never through concrete adapters.
 
 ## Data flow for an edit
 
 ```mermaid
 sequenceDiagram
-  participant UI as Canvas UI
-  participant Store as editorStore (zustand)
-  participant Local as LocalDesignRepository (IndexedDB)
+  participant Canvas as Canvas / Inspector
+  participant Studio as studioStore
+  participant WS as workspaceStore
+  participant DB as Encrypted IndexedDB
   participant Sync as SyncEngine
   participant Cloud as Supabase
-  UI->>Store: updateElements(ids, patch)
-  Store->>Store: validate (zod) + push undo history, revision++
-  Store-->>Local: autosave after 400ms (dirty = 1)
-  Local-->>Sync: requestSync() (debounced 1.5s)
+  Canvas->>Studio: gesture or command
+  Studio->>Studio: pure operation → zod validation → one undo step
+  Studio->>WS: saveDocument(doc)
+  WS-->>Canvas: in memory now ("Unsaved changes")
+  WS->>DB: after 400 ms idle (or tab hidden): seal + put ("Saving…" → "Saved")
+  DB-->>WS: ok
+  WS->>Sync: mark dirty (plaintext bookkeeping: id, version, flags)
+  Sync->>Sync: seal with the data key (AES-GCM)
   Sync->>Cloud: update … where version = n (sets n+1)
   alt accepted
-    Cloud-->>Sync: row v(n+1)
-    Sync->>Local: markSynced (clears dirty only if no newer edit)
+    Cloud-->>Sync: row v(n+1) → clean unless edited mid-push ("Synced")
   else version conflict
-    Sync->>Local: keep local as "(conflicted copy)", adopt server copy
+    Sync->>WS: server copy wins; local edit kept as "(conflicted copy)"
   end
-  Cloud-->>Sync: realtime change on another device → pull (keyset cursor)
+  Cloud-->>Sync: realtime / 30 s poll → pull by cursor → open + zod-validate → apply
 ```
+
+An open editor is never changed underneath the user: a pulled change to it shows "changed on another device" with **Load latest**. Edits that are still waiting to be stored count as conflicts, so a pull never overwrites typing.
+
+During a drag, `previewGesture` replaces the present document without history; `endGesture` records one undo step and one save.
 
 ## Key properties
 
-- **Local-first.** The UI only ever talks to the local database. Sync is a background process that can fail without affecting editing.
-- **Per-user isolation.** On the device, each account gets its own IndexedDB database (`canvas-studio-<userId>`). In the cloud, RLS policies restrict every row and storage object to `auth.uid()`.
-- **No lost work.** Optimistic concurrency (`version`) detects concurrent edits; the losing side becomes a separate design instead of being overwritten. Deletions are tombstones, so they propagate too. Sync passes are serialised across browser tabs with a Web Lock, so two tabs never push the same edit.
-- **Versioned documents.** Documents carry `schemaVersion`; old ones are upgraded by pure step migrations on read, and ones from a newer deploy pause sync with "reload to update" instead of being skipped (ADR 0007).
-- **Validated boundaries.** Exported files (zod plus file signatures), cloud rows (zod), dropped drag payloads (zod), uploads (MIME allow-list, signatures, size, SHA-256 integrity on download) and new or patched elements are all validated.
-- **Hardened browser surface.** A build-time CSP (`script-src 'self'`, network and images limited to the configured Supabase host), plus HTTP headers from `vercel.json`: HSTS, `frame-ancestors 'none'`, nosniff, COOP and a restrictive Permissions-Policy. The session is in browser storage, so XSS is treated as the critical risk (ADR 0006).
-
-- **Public only by token.** Share links expose one PNG and title per shared design through a security-definer lookup by exact token; nothing public can be listed (ADR 0008).
-- **Split by route.** The entry point validates config and then loads either the public share page (~154 KB gzipped in total) or the editor (+287 KB: Konva, jsPDF, sync). People opening a share link never download the editor.
-- **Authorisation is tested.** RLS policies and SQL functions have tests in `supabase/tests/`, run on Postgres in CI.
-
-See `docs/adr/` for the reasoning behind each choice.
+- **Single renderer.** Editor, thumbnails and exports all use `DesignSvg` (ADR 0009).
+- **Validated boundaries.** Documents read from storage, every operation result, uploads (magic bytes, size, dimensions; no SVG), URL filters, redirect targets, export file names and email recipients are validated.
+- **Encrypted at rest and in the cloud.** Workspace records are AES-GCM sealed with a per-account key that only the password (or recovery code) unlocks; the server stores only ciphertext and the wrapped key (ADR 0010, 0012).
+- **Optimistic, never lossy.** Edits land in memory instantly. A failed save keeps the edit and offers a retry; a failed delete rolls back; deletes offer undo for 10 s.
+- **Split by route.** The landing and auth pages load first; the dashboard, studio, `react-dom/server` (SVG export), jsPDF and supabase-js are separate chunks loaded on demand.
+- **Hardened browser surface.** Build-time CSP (`script-src 'self'`), HTTP headers from `vercel.json`, no raw HTML injection (lint-enforced).

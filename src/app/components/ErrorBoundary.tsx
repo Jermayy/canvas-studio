@@ -1,52 +1,55 @@
 import type { Logger } from '@/shared/logger';
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
-export interface ErrorBoundaryProps {
+interface Props {
   logger: Logger;
   children: ReactNode;
+  /** Smaller inline fallback for a single panel instead of the whole page. */
+  inline?: boolean;
 }
 
-interface ErrorBoundaryState {
-  failed: boolean;
+interface State {
+  error: Error | null;
 }
 
-/**
- * Last-resort UI for render errors. Designs are autosaved locally, so
- * reloading is safe and loses at most the last fraction of a second.
- */
-export class ErrorBoundary extends Component<
-  ErrorBoundaryProps,
-  ErrorBoundaryState
-> {
-  override state: ErrorBoundaryState = { failed: false };
+/** Keeps one failing view from blanking the app; logs the failure. */
+export class ErrorBoundary extends Component<Props, State> {
+  override state: State = { error: null };
 
-  static getDerivedStateFromError(): ErrorBoundaryState {
-    return { failed: true };
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
   }
 
   override componentDidCatch(error: Error, info: ErrorInfo): void {
     this.props.logger.error('ui.render_failed', {
       error,
-      componentStack: info.componentStack ?? '',
+      componentStack: info.componentStack ?? undefined,
     });
   }
 
   override render(): ReactNode {
-    if (!this.state.failed) {
+    if (!this.state.error) {
       return this.props.children;
     }
     return (
-      <div className="fatal-screen" role="alert">
+      <div
+        className={this.props.inline ? 'error-panel' : 'error-screen'}
+        role="alert"
+      >
         <h1>Something went wrong</h1>
-        <p>Your designs are saved on this computer. Reload to continue.</p>
+        <p>
+          {this.props.inline
+            ? 'This panel failed to load. Your design is safe.'
+            : 'The page hit an unexpected error. Your saved work is safe on this device.'}
+        </p>
         <button
           type="button"
-          className="primary"
+          className="btn btn--primary btn--md"
           onClick={() => {
-            window.location.reload();
+            this.setState({ error: null });
           }}
         >
-          Reload
+          Try again
         </button>
       </div>
     );

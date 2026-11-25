@@ -1,13 +1,14 @@
+import type { DesignDocument } from '@/modules/document/domain/schema';
+import type { ExportScale } from '@/modules/export/domain/exportOptions';
 import { z } from 'zod';
 
-/** Public share pages live at /s/<share id>. */
+/** Public share pages live at /s/<share id> (ADR 0008). */
 export const SHARE_PATH_PREFIX = '/s/';
 
-/**
- * Share images are capped so a poster-sized design doesn't produce a
- * huge public PNG; plenty for viewing on any screen.
- */
+/** Keeps public images viewable on any screen without huge files. */
 export const MAX_SHARE_IMAGE_SIDE = 2400;
+/** Matches the workspace-shares bucket limit. */
+export const MAX_SHARE_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const shareIdSchema = z.uuid();
 
@@ -15,25 +16,14 @@ export function buildShareUrl(origin: string, shareId: string): string {
   return `${origin}${SHARE_PATH_PREFIX}${shareId}`;
 }
 
-/**
- * Returns the share id when `pathname` is a share page, else null.
- * Validated here so malformed ids never reach the server.
- */
-export function parseShareId(pathname: string): string | null {
-  if (!pathname.startsWith(SHARE_PATH_PREFIX)) {
-    return null;
-  }
-  const candidate = pathname.slice(SHARE_PATH_PREFIX.length).replace(/\/$/, '');
+/** The share id of a /s/… path, validated so junk never reaches the server. */
+export function parseShareId(candidate: string): string | null {
   const parsed = shareIdSchema.safeParse(candidate);
   return parsed.success ? parsed.data.toLowerCase() : null;
 }
 
-/** True for any /s/... path, valid id or not (it's a share page either way). */
-export function isSharePath(pathname: string): boolean {
-  return pathname.startsWith(SHARE_PATH_PREFIX);
-}
-
-/** Render scale that keeps the longest side within the share cap. */
-export function shareImageScale(width: number, height: number): number {
-  return Math.min(1, MAX_SHARE_IMAGE_SIDE / Math.max(width, height));
+/** Retina-sharp when it fits the cap, otherwise actual size. */
+export function shareImageScale(document: DesignDocument): ExportScale {
+  const side = Math.max(document.format.width, document.format.height);
+  return side * 2 <= MAX_SHARE_IMAGE_SIDE ? 2 : 1;
 }

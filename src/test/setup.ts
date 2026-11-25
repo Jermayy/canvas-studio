@@ -10,13 +10,11 @@ URL.createObjectURL = () => {
 };
 URL.revokeObjectURL = () => undefined;
 
-vi.mock('react-konva', async () => {
-  const { reactKonvaMock } = await import('@/test/reactKonvaMock');
-  return reactKonvaMock;
-});
+// Nor pointer capture.
+Element.prototype.setPointerCapture = () => undefined;
+Element.prototype.releasePointerCapture = () => undefined;
+Element.prototype.hasPointerCapture = () => false;
 
-afterEach(async () => {
+afterEach(() => {
   cleanup();
-  const { resetKonvaMock } = await import('@/test/reactKonvaMock');
-  resetKonvaMock();
 });

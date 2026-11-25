@@ -1,20 +1,35 @@
 # Canvas Studio
 
-A web app for designing event posters (birthdays, Christmas parties…) from templates and drag-and-drop assets, with PDF/PNG export, sharing, and local-first cloud sync.
+**Live app: [canvas-studio-jermayys-projects.vercel.app](https://canvas-studio-jermayys-projects.vercel.app)** (production, deployed from `main`; it shows the v2 hybrid described below once [PR #15](https://github.com/Jermayy/canvas-studio/pull/15) is merged).
+
+> **Creating an account may not work right now.** New accounts need an activation email, and the app's email (SMTP) setup is still limited, so the email may be delayed or not arrive. To try Canvas Studio straight away, choose **Try without an account** on the home page: the sandbox has the full editor and every export format, without saving.
+
+A professional, browser-based studio for event graphics: posters, invitations, slides, social posts and banners, for birthdays and Christmas parties through to conferences and award nights. Start from a template or a blank canvas, design with precision tools, and export print-ready PDF, PNG, JPEG or vector SVG.
+
+> **v2** is a fresh implementation; this **hybrid** branch adds v1's real cloud sync, share links and account deletion back on top of it, encrypted before anything leaves the browser. For what changed from v1, the code worth reading and the go-live checklist, see **[docs/v2-overview.md](docs/v2-overview.md)**.
 
 ## Why
 
-Making a quick party invite shouldn't need an install or a design degree. Canvas Studio opens from a link, keeps working when the connection drops, and syncs your designs to your account when you're back online.
+Event graphics shouldn't need an install, a subscription or a design degree, and work files shouldn't be readable by whoever uses the computer next. Canvas Studio opens from a link, works offline once loaded, saves as you type, and encrypts your designs with a key only your password unlocks.
 
 ## Features
 
-- **Canvas editor:** drag, resize, rotate and layer shapes, text, stickers and your own images; inline text editing; undo/redo; keyboard shortcuts; zoom and fit.
-- **Templates and assets:** birthday, Christmas, party and blank templates in poster, square, story and landscape sizes, plus a bundled sticker library.
-- **Export and share:** download as PDF or PNG, or share through the device's share sheet (Web Share API). Browsers that can't share files get a download instead.
-- **Share links:** _Copy link_ creates a view-only link (`/s/<id>`). Anyone with it can see the design as an image and download it, but can't edit it. Copy again to refresh the image; _Stop sharing_ turns the link off.
-- **Accounts:** email/password sign-in through Supabase Auth. Each user's data is isolated by row-level security on the server and by a separate local database in the browser.
-- **Local-first sync:** every edit saves to the browser first. When online, changes upload in the background and arrive live on your other devices (realtime, with polling as a fallback). Conflicting edits never overwrite each other: the server copy wins and your version is kept as a "(conflicted copy)" design.
-- **Guest mode:** use the app without an account; designs then stay in this browser only.
+- **Secure accounts.** Device-local accounts (PBKDF2-SHA256, 600k iterations; throttled after 5 failed attempts; generic errors) or Supabase Auth when configured. Sessions last 12 hours, or 30 days with "keep me signed in", and an open tab signs out when its session expires.
+- **Encrypted workspaces.** Every design and uploaded image is sealed with AES-256-GCM using a per-account key that only your password unlocks (ADR 0010).
+- **Encrypted cloud sync.** With Supabase, designs and images sync between your devices as ciphertext: the server never sees them unencrypted. Your key is stored wrapped by your password and recovery code, so any device unlocks it. Edits from other devices arrive live (realtime, with polling as a fallback). Conflicting edits never overwrite each other: the cloud copy wins and yours is kept as a "(conflicted copy)". An open design changed elsewhere offers **Load latest**. One tab edits an account at a time: another tab offers **Use here** to take over (ADR 0012).
+- **Password reset that keeps your designs.** Each account gets a one-time recovery code at sign-up; "Forgot password?" takes your email, the code and a new password and re-encrypts the key, so nothing is lost. Signed in, **Account & security** changes the password or issues a new code (ADR 0011). With Supabase, the reset starts from an emailed link.
+- **Delete your account.** **Account & security → Delete account**, confirmed with your password, deletes everything: cloud designs, images, share links, your sign-in, the wrapped key and this device's copy. Deleting a single design also turns off its share link.
+- **Sandbox, no account needed.** The full editor from the landing page, offline-capable. Nothing is saved, and the UI says so (banner, "Not saved" chip, leave-page warning).
+- **Projects dashboard.** Filter by template type, date created and last edited; search and sort; grid or list view. Filters live in the URL. Rename, duplicate, and delete with undo.
+- **Templates and formats.** 10 templates across birthday, Christmas, wedding, corporate, conference and party, plus blank canvases in 8 formats (A4, Letter, 5×7 invitation, square, portrait, story, 16:9 slide, web banner).
+- **Elements.** Text styles and font pairings (11 system font families), 9 shapes (with corner radius, gradient fills, outlines, drop shadows), lines, arrows and connectors, 53 icons, and your own images (PNG, JPEG, GIF or WebP up to 15 MB, checked by file signature).
+- **Precision editor.** Drag, resize and rotate handles (resizing works along a rotated element's own axes), smart guides with snapping (hold Alt to move freely), box select, multi-select, align and distribute, layer order, copy/paste, numeric position and size, undo/redo, zoom and fit, and in-place text editing.
+- **Clear layers.** Every layer says what it is and what state it's in ("Text · Didot · 30px · Regular", "Locked — can't be moved, resized or deleted", "Hidden — not shown or exported", "Layer 3 of 9 from the front"). Drag or Alt+↑/↓ to reorder; F2 to rename.
+- **Power-user tools.** ⌘K command palette, single-key panel shortcuts, a shortcut sheet (`?`), and a live status bar with size, position, rotation and stack position.
+- **Export.** PDF, PNG, JPEG or SVG with a validated custom file name, 1–4× size with output pixels and dpi shown, JPEG quality, and transparent PNG/SVG. Progress shows each phase.
+- **Share.** A **view-only link** (`/s/<token>`, with Supabase): anyone with it sees the design's name and an image, and can download a PNG; update it after changes or stop sharing at any time. Also the device's native share sheet (files), an email draft in your mail app (the file is downloaded to attach), or copy the image to the clipboard.
+- **Live feedback.** Optimistic saving (Unsaved changes → Saving… → Saved, or Save failed · Retry), cloud sync status (Syncing / Synced / Offline / Sync paused, live or polling), skeleton loading, inline validation, a password strength meter, and toasts with undo.
+- **Make it yours.** System/light/dark theme, 6 accent colours, comfortable/compact density, 3 interface sizes, dotted/grid/plain canvas backdrop, snapping, layer hints and reduced motion.
 
 ## Quick start
 
@@ -24,123 +39,124 @@ npm install
 npm run dev                  # http://localhost:5173
 npm test                     # unit + component tests
 npm run check                # format, lint, typecheck, tests with coverage
-npm run test:db              # SQL tests (RLS, functions) — needs a Postgres, see below
 npx playwright install chromium   # once
 npm run test:e2e             # browser journeys against the production build
+npm run test:db              # v1 SQL tests (RLS, functions); needs a Postgres, see below
 ```
 
-**No Supabase project is needed to run it.** With no `.env`, the app runs local-only: choose "Continue without an account" and everything except cloud sync works. To enable accounts and sync, see below.
-
-## Setting up cloud sync (Supabase)
-
-1. Create a project at [supabase.com](https://supabase.com) in the **Sydney (ap-southeast-2)** region (see Data and privacy).
-2. Apply the migrations in `supabase/migrations/`, in order: `npx supabase link --project-ref <ref>` then `npx supabase db push --remote` (without `--remote` the CLI targets a local Docker stack).
-3. Under **Authentication → Providers**, keep Email enabled. Leaving "Confirm email" on is recommended.
-4. Under **Authentication → URL Configuration**, set the Site URL (production: the deployed URL; staging: `http://localhost:5173`, not Supabase's default `:3000`) and the redirect allow-list (see the runbook).
-5. Copy the project URL and **publishable (anon) key** from **Project Settings → API** into `.env` (`cp .env.example .env`).
-
-The publishable key is designed to ship in browsers; row-level security is what protects each user's data. **Never** put the `service_role`/secret key in `.env`: the app refuses to start if you do.
-
-## End-to-end tests
-
-`e2e/` runs the critical journeys in Chromium against a production build served by `vite preview`, in local-only mode, so no secrets are needed: create a design from a template, edit it, keep it across reloads (including the last edit when the tab is hidden), download a real PNG, the share page for a bad link, a strict CSP, and no console errors or CSP violations.
-
-Against a deployment, `E2E_BASE_URL=https://<preview-url> npm run test:e2e` also checks the HTTP security headers from `vercel.json`.
-
-## Database tests
-
-`supabase/tests/*.test.sql` check the migrations' row-level security and functions on plain Postgres, using small stand-ins for Supabase's `auth` and `storage` schemas. CI runs them against a Postgres service container. Locally:
-
-```bash
-docker run --rm -d -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17
-npm run test:db
-```
-
-The stand-ins aren't a full Supabase: behaviour that depends on real Supabase (Storage API, Auth) is covered by the TypeScript tests with fakes and should be smoke-tested in staging.
+**No backend is needed.** With no `.env`, accounts are device-local and everything works. Create an account, or choose "Try without an account" for the sandbox.
 
 ## Configuration
 
-| Variable                        | Required | Description                                                  |
-| ------------------------------- | -------- | ------------------------------------------------------------ |
-| `VITE_SUPABASE_URL`             | for sync | Supabase project URL (https; http only for a local Supabase) |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | for sync | Supabase publishable/anon key                                |
+| Variable                        | Required              | Description                                                  |
+| ------------------------------- | --------------------- | ------------------------------------------------------------ |
+| `VITE_SUPABASE_URL`             | for Supabase accounts | Supabase project URL (https; http only for a local Supabase) |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | for Supabase accounts | Supabase publishable/anon key                                |
 
-Set both or neither; setting only one is a startup error. Values are compiled into the bundle at build time, so they are public by design.
+Set both or neither; setting only one is a startup error, and a `service_role`/secret key is refused. The values are compiled into the bundle, so they're public by design. When set, Supabase Auth verifies credentials (email confirmation supported), and designs sync encrypted, with share links available. Without them, accounts and designs stay on the device and there's no sync or share links.
+
+## Setting up Supabase (optional)
+
+1. Create a project in **Sydney (ap-southeast-2)**.
+2. Under **Authentication → Providers**, keep Email enabled. "Confirm email" on is recommended.
+3. Under **Authentication → URL Configuration**, set the Site URL and allow-list redirects to `/sign-in` (see [docs/runbooks/deploy.md](docs/runbooks/deploy.md)).
+4. Apply the migrations: `npx supabase link --project-ref <ref>` then `npx supabase db push --remote`. `20261125000000_encrypted_workspaces.sql` adds the v2 tables (`workspace_keys`, `workspace_designs`, `workspace_shares`), buckets (`workspace-assets` private, `workspace-shares` public) and functions. Rollbacks are in `supabase/rollback/`.
+5. Copy the URL and publishable key into `.env` (`cp .env.example .env`).
+
+v1's tables (`designs`, `design_shares`) and buckets are still created by the older migrations but unused; a later contract migration drops them.
+
+## Tests
+
+- **Unit and component (Vitest + Testing Library):** 302 tests across the domain, stores, crypto, auth, sync and export pipeline, plus full-screen flows (sign-up → dashboard → studio, canvas gestures, keyboard shortcuts, export/share dialogs, share links, account deletion). Sync runs two "devices" against an in-memory cloud with the server's rules (conflicts, tombstones, images, offline, retries, realtime, wrong keys). Coverage thresholds: domain/application/state/data/sync ≥ 90% lines, components ≥ 70%.
+- **End to end (Playwright, production build):** the sandbox exports real PNG, JPEG, SVG and PDF files (signatures checked); sign-up → edit → hidden-tab flush → reload → ciphertext-only IndexedDB → filters; strict CSP with no console errors. Against a deployment, `E2E_BASE_URL=https://<preview-url> npm run test:e2e` also checks the HTTP security headers.
+- **Database:** `supabase/tests/*.test.sql` check RLS, version enforcement, tombstones without ciphertext, share links and account deletion on plain Postgres with Supabase stand-ins. Locally: `docker run --rm -d -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17 && npm run test:db`.
 
 ## Deploying (Vercel)
 
-The app is a static SPA. `vercel.json` sets the build, SPA rewrites, long-lived caching for hashed assets and the HTTP security headers (HSTS, `frame-ancestors`, nosniff, COOP, Permissions-Policy). The Content-Security-Policy is injected into `index.html` at build time because it names the Supabase host.
+A static SPA. `vercel.json` sets the build, SPA rewrites, long-lived caching for hashed assets and the security headers (HSTS, `frame-ancestors`, nosniff, COOP, Permissions-Policy). The CSP is injected into `index.html` at build time. Every PR gets a preview; merging to `main` deploys production. Rollback: promote the previous deployment. Details, environments and dashboard-only settings: [docs/runbooks/deploy.md](docs/runbooks/deploy.md).
 
-1. Import the repo in Vercel. Framework and build settings come from `vercel.json`.
-2. Set the environment variables **per environment** (playbook: environments are isolated):
-   - **Production:** the production Supabase project.
-   - **Preview:** a separate staging Supabase project, or leave both unset so previews run local-only. Never point previews at production data.
-3. Every pull request gets a preview URL; merging to `main` deploys production.
-
-Rollback: promote the previous deployment in the Vercel dashboard (instant, no rebuild).
-
-**Live:** https://canvas-studio-jermayys-projects.vercel.app. The exact environments, dashboard-only settings, migration routine, smoke test and rollback steps are in [docs/runbooks/deploy.md](docs/runbooks/deploy.md).
+**Live:** https://canvas-studio-jermayys-projects.vercel.app (production Supabase project `Canva-Studio-Production`, Sydney).
 
 ## Keyboard shortcuts
 
-| Action      | Shortcut                                                    |
-| ----------- | ----------------------------------------------------------- |
-| Undo / redo | ⌘Z / ⇧⌘Z (Ctrl on Windows/Linux)                            |
-| Duplicate   | ⌘D                                                          |
-| Delete      | Delete / Backspace                                          |
-| Nudge       | Arrow keys (Shift = 10px)                                   |
-| Zoom        | ⌘+ / ⌘−                                                     |
-| Deselect    | Esc                                                         |
-| Edit text   | Double-click; ⌘Enter or click away to finish, Esc to cancel |
+| Action                   | Shortcut                                             |
+| ------------------------ | ---------------------------------------------------- |
+| Command palette          | ⌘K                                                   |
+| Undo / redo              | ⌘Z / ⇧⌘Z (Ctrl on Windows/Linux)                     |
+| Save now / export        | ⌘S / ⌘E                                              |
+| Select all / deselect    | ⌘A / Esc                                             |
+| Duplicate / copy / paste | ⌘D / ⌘C / ⌘V                                         |
+| Delete                   | Delete / Backspace (locked layers kept)              |
+| Nudge                    | Arrow keys (Shift = 10 px)                           |
+| Layer order              | [ ] (Shift: to back / front)                         |
+| Edit text                | Enter or double-click; ⌘Enter to finish              |
+| Zoom                     | ⌘+ / ⌘−, ⌘+scroll, Shift+1 fit, Shift+0 100%         |
+| Panels                   | T text · S shapes · I icons · U uploads · B backdrop |
+| All shortcuts            | ?                                                    |
 
 ## Project structure
 
 ```
-index.html            App shell (CSP injected at build time)
-build/                Build-time helpers (CSP), run by vite.config.mts
+index.html              App shell (CSP injected at build time)
+build/                  Build-time helpers (CSP), run by vite.config.mts
 src/
-  main.tsx            Entry point: config validation and wiring only
-  app/                Root App, config, workspace wiring, shared hooks
-  shared/             Structured logger
+  main.tsx              Entry point: logger, text metrics, config, services
+  app/                  App shell, router, service container, composition root
+  shared/               Logger, AES-GCM crypto, utilities, design-system UI
   modules/
-    auth/             Supabase client, AuthService, sign-in screen
-    designs/          Local database (Dexie/IndexedDB), repositories, home screen
-    editor/           Document model, pure operations, undo history, store, canvas UI
-    export/           PNG/PDF rendering, file delivery (download / Web Share)
-    account/          Account deletion (use case + dialog)
-    library/          Templates, stickers, shapes, side panel
-    share/            Share links: Supabase adapter, editor link bar, public page
-    sync/             Sync engine, Supabase adapter, status badge
-  test/               Factories, fakes, react-konva mock
-supabase/             SQL migrations (+ rollbacks)
-docs/                 Architecture overview and ADRs
-vercel.json           Hosting config and security headers
+    document/domain     Schema, geometry, operations, history, snapping, text layout, layers, filters
+    library/            Templates, presets, icon catalog, template picker
+    render/             SVG renderer shared by editor, thumbnails and exports
+    workspace/          Storage ports, encrypted IndexedDB stores, optimistic cache, upload rules
+    auth/               Credentials, throttling, AuthService, local + Supabase providers, keyring
+    sync/               Sync engine, sealed envelopes, bookkeeping, Supabase adapter, status chip
+    export/             Export options, pipeline, browser encoders, file delivery, dialog
+    share/              Share links (store, card, public page), email drafts, share dialog
+    account/            Account deletion use case and cloud-file cleanup
+    preferences/        Interface customisation
+    dashboard/          Projects page
+    studio/             Editor: store, gestures, shortcuts, commands, panels, canvas
+    landing/            Marketing page
+  styles/               Tokens, base, components, pages, studio
+  test/                 Factories and a fake service container
+e2e/                    Playwright journeys
+supabase/               SQL migrations (+ rollbacks, RLS tests on Postgres)
+docs/                   Architecture, ADRs, runbooks, v2 overview
 ```
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/). The move from Electron to the web is recorded in [ADR 0005](docs/adr/0005-web-app-on-vercel.md), the session-storage trade-off in [ADR 0006](docs/adr/0006-browser-session-storage.md), document versioning in [ADR 0007](docs/adr/0007-design-document-schema-versioning.md) and share links in [ADR 0008](docs/adr/0008-view-only-share-links.md).
+See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/): one SVG renderer for everything ([ADR 0009](docs/adr/0009-svg-renderer-for-editor-and-exports.md)); encrypted workspaces and device-local accounts ([ADR 0010](docs/adr/0010-encrypted-local-workspaces-and-simulated-sync.md)); password reset with recovery codes ([ADR 0011](docs/adr/0011-password-reset-with-recovery-codes.md)); encrypted cloud sync, server-held wrapped keys and share links ([ADR 0012](docs/adr/0012-encrypted-cloud-sync-and-share-links.md)). The v1 decisions (ADRs 0001–0008) are kept for history.
 
 ## Data and privacy
 
-- **Stored in the browser:** designs and uploaded images in IndexedDB, one database per account. The sign-in session is in localStorage (see ADR 0006).
-- **Stored in the cloud (signed-in users only), in Supabase's Sydney region:** email and password hash (Supabase Auth), designs, and uploaded images.
-- **Public (only what you share):** for each design you share, its title and a PNG image, readable by anyone with the link until you stop sharing. Images may stay in CDN caches for up to a minute after that.
-- **Account deletion (self-service):** _Delete account_ on the home screen, confirmed with your password. It deletes your uploaded files, then your account (which cascades to your designs and share links), then this browser's local copy. The server refuses to delete an account that still has files, so no personal files are orphaned. Each step is safe to retry if it's interrupted.
+- **In this browser:** device-local accounts (email, name, salted password verifier, and the data key wrapped by your password and by your recovery code; never the code itself), the current session, and your designs and images, encrypted with your account key. Interface preferences and sign-in throttling counters are in localStorage.
+- **Leaves the device:** nothing, with device-local accounts. With Supabase configured (Sydney): your email, name and password hash (Supabase Auth); your data key **wrapped** by your password and by your recovery code; and your designs and images **as ciphertext**, plus the sync metadata needed (ids, versions, timestamps, deletion markers). Deleted designs keep only that metadata, not their content.
+- **Shared by link (only what you share):** for each shared design, its name and a PNG image, readable by anyone with the link while it's on. The image is stored privately and served through short-lived signed links, so stopping sharing or deleting the design cuts access within minutes.
+- **Not end-to-end against the auth provider:** the same password signs in to Supabase Auth, so whoever runs the auth server could in principle capture it and unwrap the key. A database or backup leak exposes ciphertext and the wrapped key; the wrap still allows offline guessing of weak passwords (PBKDF2-SHA256, 600k iterations), so use a strong one (ADR 0012).
+- **Account deletion (self-service):** deletes cloud files and share images, then the account (keys, designs and links cascade), then this device's copy. Each step is safe to retry.
+- **Sandbox:** nothing is stored; closing the tab discards the design.
+- **No analytics or tracking.**
 
 ## Known gaps
 
-- No password reset or MFA UI yet. Supabase supports both; they need screens.
-- Account deletion clears the local copy in the browser where you delete it; other browsers keep their local copy until they're signed out (they can't sync it anywhere).
-- Deleted designs remain as server-side tombstones; there's no scheduled purge yet.
-- **Offline:** editing, saving and guest mode work offline once the page has loaded, and sync catches up when you reconnect. Opening or reloading the page with no connection doesn't work yet: that needs a service worker to cache the app shell (planned). The app asks the browser to keep its data (persistent storage) when you create a design; guests see a note that browser storage can be cleared.
-- No error-tracking service yet; logs go to the browser console as structured JSON.
-- PDF export is a raster image (PNG) inside a PDF: fine for screens and home printing, not for large-format print.
-- **Held-back dependencies:** TypeScript stays on 6.x until typescript-eslint supports 7 (its peer range is `<6.1.0`), and `@types/node` stays on 24.x to match the Node 24 runtime. Dependabot is told to skip those majors in `.github/dependabot.yml`; lift the ignore when the blocker goes away.
+- **One tab at a time per account.** A second tab offers **Use here**; the other tab saves and pauses.
+- **Limits:** 5,000 designs and 5,000 uploaded images per account.
+- **Conflicts aren't merged.** When two devices edit the same design, both versions are kept (the other as a "(conflicted copy)").
+- **Only images used by a synced design roam.** Library images that no design uses stay on the device that uploaded them.
+- **Supabase is tested with fakes and plain Postgres.** Smoke-test sync, share links, email reset and account deletion against the staging project before production.
+- **Lost password and lost recovery code** means the encrypted workspace can't be recovered (by design, ADR 0011). The Supabase email-reset path is tested with fakes only; smoke-test it in staging.
+- **PDF is raster inside a vector page** (up to 384 dpi), not native vector.
+- **System fonts only** (CSP), so typography can vary slightly between operating systems.
+- **v1 data isn't migrated** (it was test data). v1 share links (`/s/<token>` from v1) stop working.
+- **Account activation emails are limited.** Email sending (custom SMTP) isn't fully set up yet, so activation and password-reset emails may be delayed or not arrive. Use the sandbox (**Try without an account**) in the meantime.
+- **Opening or reloading the app offline needs a service worker** (planned). The sandbox works offline once loaded.
+- **No error-tracking service yet**; logs are structured JSON in the console.
+- **Held-back dependencies:** TypeScript stays on 6.x until typescript-eslint supports 7, and `@types/node` on 24.x to match the runtime (see `.github/dependabot.yml`).
 
 ## Contributing
 
-Every pull request updates this README to match the change (features, setup, configuration, structure, known gaps). CI's **README** check fails a PR that doesn't touch it; add the `skip-readme` label only when there's genuinely nothing to document. Dependabot PRs are exempt.
+Every pull request updates this README to match the change. CI's **README** check fails a PR that doesn't touch it; add the `skip-readme` label only when there's genuinely nothing to document. Dependabot PRs are exempt.
 
 `main` is protected: changes land through a pull request with the `check`, `database`, `e2e` and `readme-updated` checks green and the branch up to date; force-pushes and deletion are blocked, for admins too.
 
