@@ -41,3 +41,18 @@ Option 3.
 - Conflicts are resolved per design, not merged; the user sees both versions.
 - Images that no design uses don't roam (only referenced images are downloaded).
 - v1 cloud designs aren't migrated (they were test data); v1 tables can be dropped in a contract migration once the hybrid is live.
+
+## Review amendments (2026-11-26)
+
+The parallel review of PR #15 led to these changes before merge:
+
+- **One active tab per account.** Each tab held its own in-memory copy, so a second tab could push a stale copy over newer work. A Web Lock per account now allows one editing tab. Another tab offers **Use here**, and the previous tab saves and pauses. We chose this over per-edit base versions across tabs: it's simpler and removes the whole class of bug.
+- **Password changes store the new wrap first.** The provider's password changes only afterwards, and a provider failure restores the old wrap. Previously a failed save could leave Supabase on the new password with the key wrapped by the old one. This supersedes ADR 0011's "server password changes first".
+- **Sync hardening.** Each conflict makes exactly one copy (downloads happen first, and the copy is recorded). Pulls are guarded against edits that land mid-download. Existing data is reconciled on start. `dispose` waits for an in-flight pass. A delete after a lost insert response tombstones the row. Polls respect the backoff, and pulled images must match their id and an allowed type.
+- **Share images are private** (migration `20261126000000`). Anyone can read one only while its share and design are live, through short-lived signed URLs. A tombstone therefore cuts access, and deleting a design also unpublishes it. A share row can't be deleted before its image.
+- **Quotas:** 5,000 designs and 5,000 stored images per user.
+
+**Accepted risks, revisit if the threat model changes:**
+
+- A stolen session can overwrite the wrapped keys and lock the account's data on every device; the same session could also tombstone every design. Mitigations are the CSP and the raw-HTML lint ban. Revisit with wrap history or a locally cached last-good wrap.
+- Supabase accounts created before keys moved to the server can end up with a different key on a second device. Only pre-hybrid preview test accounts are affected.

@@ -62,10 +62,11 @@ Design principles in practice:
 
 1. **Apply the migration to staging:** `npx supabase db push --remote` against the staging project (`20261125000000_encrypted_workspaces.sql`). It's expand-only, so the live v1 app keeps working.
 2. **Smoke-test the preview deployment against staging:** sign up, then sign in on a second browser and check the design appears; edit on both to see a conflicted copy; upload an image; create, open, update and stop a share link; reset a password by email (add `/reset-password` to the redirect allow-list); delete the account and confirm the rows and files are gone. `E2E_BASE_URL=<preview> npm run test:e2e` also checks the security headers.
-3. **Review and merge** the hybrid PR (CI and branch protection as before).
-4. **Apply the migration to production**, then let the merge deploy. Apply the migration first, so that v2 clients never meet a missing table.
-5. **Before real users:** set up custom SMTP (Authentication → SMTP Settings). Supabase's built-in email only sends a few messages an hour for the whole project, so sign-ups and password resets fail with "We can't send more emails right now". Also add an error tracker (open playbook question on the vendor).
-6. **Later (contract migration):** drop v1's `designs`, `design_shares` and their buckets once nothing reads them.
+3. **Apply `20261126000000_share_and_quota_hardening.sql` to production** (`npx supabase db push --remote`), before merging, so the share page's signed URLs work.
+4. **Review and merge** the hybrid PR (CI and branch protection as before).
+5. **Let the merge deploy.** Both migrations are already on production by then (`20261125000000` was applied on 2026-11-25), so v2 clients never meet a missing table or policy.
+6. **Before real users:** set up custom SMTP (Authentication → SMTP Settings). Supabase's built-in email only sends a few messages an hour for the whole project, so sign-ups and password resets fail with "We can't send more emails right now". Also add an error tracker (open playbook question on the vendor).
+7. **Later (contract migration):** drop v1's `designs`, `design_shares` and their buckets once nothing reads them.
 
 ## Original brief
 

@@ -1,6 +1,8 @@
 # Canvas Studio
 
-**Live app: [canvas-studio-jermayys-projects.vercel.app](https://canvas-studio-jermayys-projects.vercel.app)** (production, deployed from `main`).
+**Live app: [canvas-studio-jermayys-projects.vercel.app](https://canvas-studio-jermayys-projects.vercel.app)** (production, deployed from `main`; it shows the v2 hybrid described below once [PR #15](https://github.com/Jermayy/canvas-studio/pull/15) is merged).
+
+> **Creating an account may not work right now.** New accounts need an activation email, and the app's email (SMTP) setup is still limited, so the email may be delayed or not arrive. To try Canvas Studio straight away, choose **Try without an account** on the home page: the sandbox has the full editor and every export format, without saving.
 
 A professional, browser-based studio for event graphics: posters, invitations, slides, social posts and banners, for birthdays and Christmas parties through to conferences and award nights. Start from a template or a blank canvas, design with precision tools, and export print-ready PDF, PNG, JPEG or vector SVG.
 
@@ -14,9 +16,9 @@ Event graphics shouldn't need an install, a subscription or a design degree, and
 
 - **Secure accounts.** Device-local accounts (PBKDF2-SHA256, 600k iterations; throttled after 5 failed attempts; generic errors) or Supabase Auth when configured. Sessions last 12 hours, or 30 days with "keep me signed in", and an open tab signs out when its session expires.
 - **Encrypted workspaces.** Every design and uploaded image is sealed with AES-256-GCM using a per-account key that only your password unlocks (ADR 0010).
-- **Encrypted cloud sync.** With Supabase, designs and images sync between your devices as ciphertext: the server never sees them unencrypted. Your key is stored wrapped by your password and recovery code, so any device unlocks it. Edits from other devices arrive live (realtime, with polling as a fallback). Conflicting edits never overwrite each other: the cloud copy wins and yours is kept as a "(conflicted copy)". An open design changed elsewhere offers **Load latest** (ADR 0012).
-- **Password reset that keeps your designs.** Each account gets a one-time recovery code at sign-up; "Forgot password?" takes your email, the code and a new password and re-encrypts the key, so nothing is lost. Signed in, **Account & security** changes the password or issues a new code (ADR 0011).
-- **Delete your account.** **Account & security → Delete account**, confirmed with your password, deletes everything: cloud designs, images, share links, your sign-in, the wrapped key and this device's copy. With Supabase, the reset starts from an emailed link.
+- **Encrypted cloud sync.** With Supabase, designs and images sync between your devices as ciphertext: the server never sees them unencrypted. Your key is stored wrapped by your password and recovery code, so any device unlocks it. Edits from other devices arrive live (realtime, with polling as a fallback). Conflicting edits never overwrite each other: the cloud copy wins and yours is kept as a "(conflicted copy)". An open design changed elsewhere offers **Load latest**. One tab edits an account at a time: another tab offers **Use here** to take over (ADR 0012).
+- **Password reset that keeps your designs.** Each account gets a one-time recovery code at sign-up; "Forgot password?" takes your email, the code and a new password and re-encrypts the key, so nothing is lost. Signed in, **Account & security** changes the password or issues a new code (ADR 0011). With Supabase, the reset starts from an emailed link.
+- **Delete your account.** **Account & security → Delete account**, confirmed with your password, deletes everything: cloud designs, images, share links, your sign-in, the wrapped key and this device's copy. Deleting a single design also turns off its share link.
 - **Sandbox, no account needed.** The full editor from the landing page, offline-capable. Nothing is saved, and the UI says so (banner, "Not saved" chip, leave-page warning).
 - **Projects dashboard.** Filter by template type, date created and last edited; search and sort; grid or list view. Filters live in the URL. Rename, duplicate, and delete with undo.
 - **Templates and formats.** 10 templates across birthday, Christmas, wedding, corporate, conference and party, plus blank canvases in 8 formats (A4, Letter, 5×7 invitation, square, portrait, story, 16:9 slide, web banner).
@@ -130,14 +132,16 @@ See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/): one
 
 - **In this browser:** device-local accounts (email, name, salted password verifier, and the data key wrapped by your password and by your recovery code; never the code itself), the current session, and your designs and images, encrypted with your account key. Interface preferences and sign-in throttling counters are in localStorage.
 - **Leaves the device:** nothing, with device-local accounts. With Supabase configured (Sydney): your email, name and password hash (Supabase Auth); your data key **wrapped** by your password and by your recovery code; and your designs and images **as ciphertext**, plus the sync metadata needed (ids, versions, timestamps, deletion markers). Deleted designs keep only that metadata, not their content.
-- **Public (only what you share):** for each shared design, its name and a PNG image, readable by anyone with the link until you stop sharing (CDN caches may keep the image up to a minute).
-- **Not end-to-end against the auth provider:** the same password signs in to Supabase Auth, so whoever runs the auth server could in principle capture it and unwrap the key. A database or backup leak alone exposes only ciphertext and the wrapped key (ADR 0012).
+- **Shared by link (only what you share):** for each shared design, its name and a PNG image, readable by anyone with the link while it's on. The image is stored privately and served through short-lived signed links, so stopping sharing or deleting the design cuts access within minutes.
+- **Not end-to-end against the auth provider:** the same password signs in to Supabase Auth, so whoever runs the auth server could in principle capture it and unwrap the key. A database or backup leak exposes ciphertext and the wrapped key; the wrap still allows offline guessing of weak passwords (PBKDF2-SHA256, 600k iterations), so use a strong one (ADR 0012).
 - **Account deletion (self-service):** deletes cloud files and share images, then the account (keys, designs and links cascade), then this device's copy. Each step is safe to retry.
 - **Sandbox:** nothing is stored; closing the tab discards the design.
 - **No analytics or tracking.**
 
 ## Known gaps
 
+- **One tab at a time per account.** A second tab offers **Use here**; the other tab saves and pauses.
+- **Limits:** 5,000 designs and 5,000 uploaded images per account.
 - **Conflicts aren't merged.** When two devices edit the same design, both versions are kept (the other as a "(conflicted copy)").
 - **Only images used by a synced design roam.** Library images that no design uses stay on the device that uploaded them.
 - **Supabase is tested with fakes and plain Postgres.** Smoke-test sync, share links, email reset and account deletion against the staging project before production.
@@ -145,6 +149,7 @@ See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/): one
 - **PDF is raster inside a vector page** (up to 384 dpi), not native vector.
 - **System fonts only** (CSP), so typography can vary slightly between operating systems.
 - **v1 data isn't migrated** (it was test data). v1 share links (`/s/<token>` from v1) stop working.
+- **Account activation emails are limited.** Email sending (custom SMTP) isn't fully set up yet, so activation and password-reset emails may be delayed or not arrive. Use the sandbox (**Try without an account**) in the meantime.
 - **Opening or reloading the app offline needs a service worker** (planned). The sandbox works offline once loaded.
 - **No error-tracking service yet**; logs are structured JSON in the console.
 - **Held-back dependencies:** TypeScript stays on 6.x until typescript-eslint supports 7, and `@types/node` on 24.x to match the runtime (see `.github/dependabot.yml`).
